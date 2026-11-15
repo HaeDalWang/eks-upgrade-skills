@@ -1,6 +1,8 @@
 # K8s Upgrade Skills
 
-Kubernetes 버전 업그레이드를 안전하게 완료할 수 있도록 도와주는 **AI Agent용 Skills**.
+**Terraform으로 관리하는 Amazon EKS** 클러스터의 버전 업그레이드를 안전하게 완료할 수 있도록 도와주는 **AI Agent용 Skills**.
+
+> 범위: 실제로 운영하며 검증한 환경(EKS + Terraform)만 다룹니다. 다른 플랫폼·IaC로 넓히기보다 이 조합을 깊게 가져가는 것이 목표입니다.
 
 AI Agent가 `recipe.md`에 정의된 클러스터 정보를 읽고, 사전 검증 → 업그레이드 실행 → 사후 검증까지 phase-gated 방식으로 반자동 수행합니다. 각 단계에서 사용자 확인이 필요한 경우 즉시 중단하고 보고합니다.
 
@@ -52,7 +54,7 @@ EKS 업그레이드처럼 **고위험·다단계·장기 체공** 작업은 운�
 - 워크로드 Spec 직접 수정 (PDB, replica 수, 노드 프로비저닝 등)
 - Self-managed Node Group 업그레이드 (Managed Node Group · Karpenter는 지원)
   - Fargate 프로파일 정의(IaC) 변경은 하지 않지만, CP 업그레이드 후 Fargate 노드 kubelet 갱신을 위한 Pod `rollout restart`는 Phase 7-0에서 수행합니다
-- 현재 지원하지 않는 플랫폼/IaC 조합 (개발 현황 참조)
+- EKS 외 플랫폼(온프레미스 등)과 Terraform 외 IaC(eksctl·CDK·Pulumi)
 
 ## 함께 설치되는 스킬: helm-k8s-compat
 
@@ -129,7 +131,6 @@ De-facto 표준 차트 **31종**을 큐레이션한 registry와 라이브 `helm`
 | Environment | Platform | IaC | 상태 |
 |-------------|----------|-----|------|
 | AWS | EKS | Terraform | v1 — 실 프로덕션 적용(Karpenter + Fargate 구성, 1.33→1.35 다홉) |
-| On-Premises | Kubespray | Ansible-playbook | 📋 계획됨 |
 
 > Managed Node Group 롤링 경로(Phase 4)는 코드로 구현돼 있으나 실 환경 검증 이력이 없습니다. 검증된 경로는 Karpenter + Fargate 조합입니다.
 
@@ -181,9 +182,9 @@ cd k8s-upgrade-skills
 
 ```markdown
 ---
-environment: aws          # aws | on-prem
-platform: eks             # eks | kubespray
-iac: terraform            # terraform | none
+environment: aws          # aws (고정)
+platform: eks             # eks (고정)
+iac: terraform            # terraform (고정)
 cluster_name: my-cluster  # 클러스터 식별자
 current_version: "1.34"   # 현재 버전 (따옴표 필수)
 target_version: "1.35"    # 목표 버전 (따옴표 필수) — 반드시 current_version의 차기 마이너 버전

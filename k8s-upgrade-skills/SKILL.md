@@ -1,8 +1,8 @@
 ---
 name: k8s-upgrade-skills
 description: >
-  Zero-downtime Kubernetes version upgrade across multiple infrastructure types (AWS EKS, On-prem Kubespray).
-  Validates recipe, routes to the correct platform/IaC-specific sub-skill, and enforces phase-gated safety.
+  Kubernetes version upgrade for Terraform-managed AWS EKS clusters.
+  Validates recipe, routes to the EKS/Terraform sub-skill, and enforces phase-gated safety.
   Note: disruption-aware (detects risks proactively) but does not guarantee zero-downtime.
   Trigger keywords: 'K8s upgrade', 'EKS upgrade', 'Kubernetes version upgrade', 'K8s version upgrade',
   'upgrade EKS', 'upgrade Kubernetes', 'cluster upgrade'
@@ -10,7 +10,7 @@ description: >
 
 # Kubernetes Version Upgrade — Root Router
 
-This skill upgrades Kubernetes clusters across multiple infrastructure types with zero-downtime and workload protection.
+This skill upgrades Terraform-managed AWS EKS clusters with workload protection.
 It collects upgrade requirements (from `recipe.md` if present, or interactively from the user), validates them, and routes to exactly ONE platform-specific sub-skill.
 
 All scripts referenced as `scripts/<name>.py` live in the **skill root directory** (this file's

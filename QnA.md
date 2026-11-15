@@ -38,9 +38,9 @@ Kubernetes는 마이너 버전 +1 단계 업그레이드만 공식 지원합니�
 
 현재는 Terraform으로 관리하는 EKS 클러스터만 지원합니다. eksctl, CDK, Pulumi 등은 아직 Sub-Skill이 구현되지 않았습니다.
 
-### Q: 온프레미스 Kubespray 클러스터는 언제 지원되나요?
+### Q: 온프레미스(Kubespray 등) 클러스터도 지원하나요?
 
-계획 중이며 아직 구현되지 않았습니다. `recipe.md`의 라우팅 구조는 이미 `(on-prem, kubespray, none)` 조합을 지원하도록 설계되어 있어, Sub-Skill만 추가하면 됩니다.
+지원 계획이 없습니다. 이 프로젝트는 실제로 운영하며 검증한 EKS + Terraform 조합에 집중합니다.
 
 ---
 

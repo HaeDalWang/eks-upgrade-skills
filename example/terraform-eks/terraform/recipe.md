@@ -1,8 +1,8 @@
 ---
 # ── 필수 필드 ──────────────────────────────────────────────
-environment: aws          # aws | on-prem
-platform: eks             # eks | kubespray
-iac: terraform            # terraform | none
+environment: aws          # aws (고정)
+platform: eks             # eks (고정)
+iac: terraform            # terraform (고정)
 cluster_name: upgrade-skill
 current_version: "1.34"   # 따옴표 필수. 현재 클러스터 버전
 target_version: "1.35"    # 따옴표 필수. current_version의 차기 마이너 버전만 허용 (+1)
