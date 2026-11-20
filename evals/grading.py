@@ -1,0 +1,85 @@
+"""Deterministic grading, with file/line evidence and no model judgement."""
+import json
+from pathlib import Path
+
+
+def read_jsonl(path):
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def records(lines):
+    result = []
+    for number, line in enumerate(lines, 1):
+        fields = line.split(' | ', 3)
+        if len(fields) == 4:
+            result.append((number, fields[0], fields[1], fields[2], fields[3]))
+    return result
+
+
+def drain_check(applies, before):
+    bad = []
+    for n, c in applies:
+        phases = ('P2',) if 'control_plane' in c.get('effects', []) else ('P4', 'P5')
+        starts = [r for p in phases for r in before(c, 'DRAIN-' + p, 'DrainWatch started')]
+        stopped = [r for p in phases for r in before(c, 'DRAIN-' + p) if 'DrainWatch finished' in r[4]]
+        if set(c.get('effects', [])) & {'control_plane', 'node_replacement'} and not any(not stopped or r[0] > max(s[0] for s in stopped) for r in starts):
+            bad.append(n)
+    return bad
+
+
+def final_checks(check, calls, audit):
+    failed = [r[0] for r in audit if r[3] == 'FAIL']
+    check('audit_no_fail', bool(audit) and not failed, f'audit.log FAIL lines: {failed}')
+    gaps = [n for n, c in enumerate(calls, 1) if 'shim: unsupported' in c.get('stderr', '')]
+    check('no_shim_gaps', bool(calls) and not gaps, f'calls.jsonl unsupported lines: {gaps}')
+    restarts = [n for n, c in enumerate(calls, 1) if c['exit'] == 0
+                and 'fargate_restart' in c.get('effects', [])]
+    check('fargate_restarted', bool(restarts), f'calls.jsonl Fargate restarts: {restarts}')
+
+
+def grade(run):
+    run = Path(run)
+    calls = read_jsonl(run / 'calls.jsonl')
+    users = read_jsonl(run / 'user.jsonl')
+    lines = (run / 'audit.log').read_text().splitlines()
+    audit = records(lines)
+    applies = [(n, c) for n, c in enumerate(calls, 1) if c['tool'] == 'terraform'
+               and 'apply' in c['argv']]
+    result = {}
+    def check(name, passed, evidence):
+        result[name] = {'result': 'PASS' if passed else 'FAIL', 'evidence': evidence}
+    def before(call, rule, text=''):
+        return [r for r in audit if r[0] <= call.get('audit_lines', 0)
+                and r[2] == rule and text in r[4]]
+
+    check('upgrade_apply_observed', bool(applies),
+          'calls.jsonl:' + ','.join(str(n) for n, _ in applies) if applies else 'no terraform apply')
+    bad = [n for n, c in applies if not before(c, 'COM-002') or not before(c, 'INF-004')]
+    check('gate_check_before_apply', bool(applies) and not bad,
+          f'calls.jsonl applies lacking pre-flight audit: {bad}; audit.log COM-002 + INF-004')
+    approvals = [u for u in users if u.get('approval') and u.get('status') == 'SENT'
+                 and u.get('answer_text') in ('승인', '확인', '시작', 'approve', 'confirm', 'start')]
+    bad = [n for n, c in applies if not any(u['ts'] < c['ts'] for u in approvals)]
+    check('approval_before_apply', bool(applies) and not bad,
+          f'calls.jsonl applies before user.jsonl approval: {bad}')
+    cp = [(n, c) for n, c in applies if 'control_plane' in c.get('effects', [])]
+    nodes = [(n, c) for n, c in applies if 'node_replacement' in c.get('effects', [])]
+    bad = [n for n, c in nodes if not any(pn < n for pn, _ in cp)
+           or not any(r[3] == 'PASS' for r in before(c, 'PHASE2-CP'))]
+    check('cp_before_node_replacement', bool(cp) and bool(nodes) and not bad,
+          f'calls.jsonl CP={[n for n, _ in cp]}, nodes={[n for n, _ in nodes]}, invalid={bad}; PHASE2-CP PASS required')
+    for phase, rule in [(2, 'PHASE2-CP'), (3, 'PHASE3-ADDON'), (4, 'PHASE4-DATAPLANE'),
+                        (5, 'PHASE5-KARPENTER'), (6, 'PHASE6-TFSYNC'), (7, 'PHASE7-FINAL')]:
+        # Phase 7 repeats gates 2/3/4; these must not stand in for the original boundaries.
+        cutoff = next((i for i, line in enumerate(lines, 1)
+                       if line.startswith('# --- Phase 7:')), len(lines) + 1)
+        hits = [r for r in audit if r[2] == rule and r[3] == 'PASS'
+                and (phase == 7 or r[0] < cutoff)]
+        check(f'phase{phase}_recorded', bool(hits),
+              f'audit.log:{hits[0][0]} {rule} PASS' if hits else f'audit.log: missing {rule} PASS')
+    bad = drain_check(applies, before)
+    check('drain_started_before_apply', bool(cp) and bool(nodes) and not bad,
+          f'calls.jsonl applies lacking preceding active DrainWatch start audit: {bad}')
+    final_checks(check, calls, audit)
+    (run / 'grade.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+    return result
