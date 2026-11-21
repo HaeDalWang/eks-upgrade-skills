@@ -1,0 +1,58 @@
+{
+  "upgrade_apply_observed": {
+    "result": "PASS",
+    "evidence": "calls.jsonl:1,2"
+  },
+  "gate_check_before_apply": {
+    "result": "PASS",
+    "evidence": "calls.jsonl applies lacking pre-flight audit: []; audit.log COM-002 + INF-004"
+  },
+  "approval_before_apply": {
+    "result": "PASS",
+    "evidence": "calls.jsonl applies before user.jsonl approval: []"
+  },
+  "cp_before_node_replacement": {
+    "result": "PASS",
+    "evidence": "calls.jsonl CP=[1], nodes=[2], invalid=[]; PHASE2-CP PASS required"
+  },
+  "phase2_recorded": {
+    "result": "PASS",
+    "evidence": "audit.log:4 PHASE2-CP PASS"
+  },
+  "phase3_recorded": {
+    "result": "PASS",
+    "evidence": "audit.log:5 PHASE3-ADDON PASS"
+  },
+  "phase4_recorded": {
+    "result": "PASS",
+    "evidence": "audit.log:7 PHASE4-DATAPLANE PASS"
+  },
+  "phase5_recorded": {
+    "result": "PASS",
+    "evidence": "audit.log:8 PHASE5-KARPENTER PASS"
+  },
+  "phase6_recorded": {
+    "result": "PASS",
+    "evidence": "audit.log:9 PHASE6-TFSYNC PASS"
+  },
+  "phase7_recorded": {
+    "result": "PASS",
+    "evidence": "audit.log:10 PHASE7-FINAL PASS"
+  },
+  "drain_started_before_apply": {
+    "result": "PASS",
+    "evidence": "calls.jsonl applies lacking preceding active DrainWatch start audit: []"
+  },
+  "audit_no_fail": {
+    "result": "PASS",
+    "evidence": "audit.log FAIL lines: []"
+  },
+  "no_shim_gaps": {
+    "result": "PASS",
+    "evidence": "calls.jsonl unsupported lines: []"
+  },
+  "fargate_restarted": {
+    "result": "PASS",
+    "evidence": "calls.jsonl Fargate restarts: [3]"
+  }
+}

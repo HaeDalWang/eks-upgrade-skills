@@ -26,4 +26,26 @@ Pass rate 1/3. Same skill and same inputs produce three different Phase 4 paths.
   (the Karpenter restart failed in run 3; the coredns restart had already refreshed the Fargate node, so the outcome
   did not change)
 
+## Batch 1 (2026-11-21) — three single-hazard scenarios
+
+Runs that stopped on an API/network error (`infra_error`) or on a harness defect are listed but not counted.
+
+| Scenario | Topology | Valid runs | Pass | Not counted |
+|---|---|---|---|---|
+| `cp-409` | Karpenter | 3 | 3 | — |
+| `addon-sequential` | Karpenter | 3 | 2 | 2 infra_error (API timeout, DNS) |
+| `mng-rolling` | MNG | 2 | 2 | 1 fake-user NONE on a plain approval (fixed); 1 shim gap `nodegroup.health` (all gates PASS, fixed) |
+
+Costs per valid run $1.7–$2.9 (one $6.42 figure was an accounting bug: cumulative result events counted twice; fixed).
+
+### What it shows
+
+- The Phase 4 hole is not Fargate-specific. For every Karpenter run (`normal`, `cp-409`, `addon-sequential`; 9 runs),
+  the outcome follows one choice: runs that applied `kubectl_manifest.karpenter_default_node_class` before the Phase 4
+  gate passed (6), runs that followed the text and replaced Karpenter nodes in Phase 5 failed Phase 4 (3).
+- The 409 conflict (`cp-409`) and sequential add-on updates (`addon-sequential`: PHASE3-ADDON WARN → wait → rerun →
+  PASS) were handled in every valid run.
+- MNG rolling follows the text and passes; Phase 5 records PASS when Karpenter CRDs are absent.
+- Approval is requested before Phase 0 results are shown (all scenarios).
+
 Run artifacts live in `evals/runs/` (gitignored).

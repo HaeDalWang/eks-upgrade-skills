@@ -1,10 +1,50 @@
 """Deterministic grading, with file/line evidence and no model judgement."""
 import json
+import re
+import warnings
 from pathlib import Path
+
+from .scenario_checks import scenario_checks
 
 
 def read_jsonl(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def result_events(path):
+    if not path.exists():
+        return []
+    events = []
+    lines = path.read_text().splitlines()
+    for number, line in enumerate(lines, 1):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            if number != len(lines):
+                raise ValueError(f'invalid stream event: {path}:{number}') from None
+            warnings.warn(f'incomplete final stream event: {path}:{number}', RuntimeWarning)
+            continue
+        if value.get('type') == 'result':
+            events.append(value)
+    return events
+
+
+def is_infra_error(text):
+    return bool(re.match(
+        r"(?:Request timed out\b|API Error:\s*(?:Can't reach the API server\b|"
+        r"5(?:[0-9]{2}|xx)\b|[^\n]*\boverloaded\b)|overloaded\b)",
+        text.strip(), re.IGNORECASE))
+
+
+def infra_evidence(run):
+    summary = run / 'summary.json'
+    if summary.exists() and json.loads(summary.read_text()).get('stop_reason') == 'infra_error':
+        return 'summary.json: stop_reason=infra_error'
+    for path in sorted((run / 'turns').glob('*.jsonl')):
+        events = result_events(path)
+        if events and is_infra_error(events[-1].get('result', '')):
+            return f'turns/{path.name}: ' + events[-1]['result']
+    return None
 
 
 def records(lines):
@@ -37,16 +77,39 @@ def final_checks(check, calls, audit):
     check('fargate_restarted', bool(restarts), f'calls.jsonl Fargate restarts: {restarts}')
 
 
+def phase_checks(check, audit, lines):
+    for phase, rule in [(2, 'PHASE2-CP'), (3, 'PHASE3-ADDON'), (4, 'PHASE4-DATAPLANE'),
+                        (5, 'PHASE5-KARPENTER'), (6, 'PHASE6-TFSYNC'), (7, 'PHASE7-FINAL')]:
+        # Phase 7 repeats gates 2/3/4; these must not stand in for the original boundaries.
+        cutoff = next((i for i, line in enumerate(lines, 1)
+                       if line.startswith('# --- Phase 7:')), len(lines) + 1)
+        hits = [r for r in audit if r[2] == rule and r[3] == 'PASS'
+                and (phase == 7 or r[0] < cutoff)]
+        check(f'phase{phase}_recorded', bool(hits),
+              f'audit.log:{hits[0][0]} {rule} PASS' if hits else f'audit.log: missing {rule} PASS')
+
+
 def grade(run):
     run = Path(run)
+    infra = infra_evidence(run)
+    if infra:
+        result = {'stop_reason': 'infra_error', 'excluded_from_pass_rate': True,
+                  'evidence': infra}
+        (run / 'grade.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+        return result
     calls = read_jsonl(run / 'calls.jsonl')
     users = read_jsonl(run / 'user.jsonl')
     lines = (run / 'audit.log').read_text().splitlines()
     audit = records(lines)
     applies = [(n, c) for n, c in enumerate(calls, 1) if c['tool'] == 'terraform'
                and 'apply' in c['argv']]
+    path = run / 'scenario.json'
+    scenario = json.loads((path if path.exists() else Path(__file__).parent /
+                           'scenarios/normal-karpenter-fargate.json').read_text())
     result = {}
     def check(name, passed, evidence):
+        if name not in scenario['assertions']:
+            return
         result[name] = {'result': 'PASS' if passed else 'FAIL', 'evidence': evidence}
     def before(call, rule, text=''):
         return [r for r in audit if r[0] <= call.get('audit_lines', 0)
@@ -68,18 +131,14 @@ def grade(run):
            or not any(r[3] == 'PASS' for r in before(c, 'PHASE2-CP'))]
     check('cp_before_node_replacement', bool(cp) and bool(nodes) and not bad,
           f'calls.jsonl CP={[n for n, _ in cp]}, nodes={[n for n, _ in nodes]}, invalid={bad}; PHASE2-CP PASS required')
-    for phase, rule in [(2, 'PHASE2-CP'), (3, 'PHASE3-ADDON'), (4, 'PHASE4-DATAPLANE'),
-                        (5, 'PHASE5-KARPENTER'), (6, 'PHASE6-TFSYNC'), (7, 'PHASE7-FINAL')]:
-        # Phase 7 repeats gates 2/3/4; these must not stand in for the original boundaries.
-        cutoff = next((i for i, line in enumerate(lines, 1)
-                       if line.startswith('# --- Phase 7:')), len(lines) + 1)
-        hits = [r for r in audit if r[2] == rule and r[3] == 'PASS'
-                and (phase == 7 or r[0] < cutoff)]
-        check(f'phase{phase}_recorded', bool(hits),
-              f'audit.log:{hits[0][0]} {rule} PASS' if hits else f'audit.log: missing {rule} PASS')
+    phase_checks(check, audit, lines)
     bad = drain_check(applies, before)
     check('drain_started_before_apply', bool(cp) and bool(nodes) and not bad,
           f'calls.jsonl applies lacking preceding active DrainWatch start audit: {bad}')
     final_checks(check, calls, audit)
+    scenario_checks(check, scenario, calls, audit, applies, before)
+    missing = set(scenario['assertions']) - result.keys()
+    if missing:
+        raise ValueError(f'unknown assertions: {sorted(missing)}')
     (run / 'grade.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
     return result

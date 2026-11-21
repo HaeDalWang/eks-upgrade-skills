@@ -68,7 +68,7 @@ def aws(args, state, scenario):
     if (service, operation) == ('ssm', 'get-parameters-by-path'):
         path = option(args, '--path', default='/aws/service/eks')
         return render({'Parameters': [{'Name': path + '/image_version',
-                                      'Value': '1.47.0'}]}, args), 0
+                                      'Value': '1.34.0-20261121' if scenario['topology']['mng'] else '1.47.0'}]}, args), 0
     if (service, operation) == ('ec2', 'describe-subnets'):
         return render({'Subnets': [{'SubnetId': 'subnet-demo',
                                    'AvailableIpAddressCount': 128}]}, args), 0
@@ -81,6 +81,9 @@ def eks(operation, args, state, scenario):
     if operation == 'describe-cluster':
         updating = tick(state, 'cp_remaining', {'status': 'ACTIVE',
                         'version': state.get('cp_target', state['version'])})
+        if not updating and state.pop('addons_pending', False):
+            state['addon_queue'] = list(state['addons'])
+            state['addons'][state['addon_queue'][0]]['polls'] = scenario['transitions']['addon_polls'] - 1
         cluster = {'name': scenario['cluster_name'], 'version': state['version'],
                    'status': 'UPDATING' if updating else state['status'],
                    'resourcesVpcConfig': {'subnetIds': ['subnet-demo']},
@@ -89,43 +92,70 @@ def eks(operation, args, state, scenario):
     if operation == 'list-addons':
         return render({'addons': list(state['addons'])}, args), 0
     if operation == 'describe-addon':
-        name = option(args, '--addon-name')
-        addon = state['addons'][name]
-        updating = addon['polls'] > 0
-        addon['polls'] = max(0, addon['polls'] - 1)
-        return render({'addon': {'addonName': name, 'addonVersion': addon['version'],
-                                'status': 'UPDATING' if updating else 'ACTIVE',
-                                'health': {'issues': []}}}, args), 0
+        return describe_addon(args, state, scenario)
     if operation == 'describe-addon-versions':
         return render({'addons': [{'addonName': option(args, '--addon-name'),
             'addonVersions': [{'addonVersion': 'v1.34.0-eksbuild.1',
             'compatibilities': [{'clusterVersion': scenario['target_version'],
                                   'defaultVersion': True}]}]}]}, args), 0
     if operation == 'list-nodegroups':
-        return render({'nodegroups': []}, args), 0
+        return render({'nodegroups': ['demo-system'] if scenario['topology']['mng'] else []}, args), 0
     if operation == 'describe-nodegroup':
+        updating = mng_updating(state)
         return render({'nodegroup': {'nodegroupName': option(args, '--nodegroup-name'),
-            'status': 'ACTIVE', 'version': state['version'],
-            'amiType': 'BOTTLEROCKET_x86_64', 'subnets': ['subnet-demo']}}, args), 0
+            'status': 'UPDATING' if updating else 'ACTIVE', 'version': state['node_version'],
+            'releaseVersion': state.get('mng_release', state['ami_alias']),
+            'amiType': 'AL2023_x86_64_STANDARD', 'subnets': ['subnet-demo'], 'health': {'issues': []}}}, args), 0
     if operation == 'list-insights':
         return render({'insights': [{'id': 'upgrade-readiness', 'name': 'Upgrade readiness',
             'category': 'UPGRADE_READINESS', 'kubernetesVersion': scenario['target_version'],
             'insightStatus': {'status': 'PASSING'}}]}, args), 0
+    if operation == 'list-updates':
+        key = 'mng_remaining' if option(args, '--nodegroup-name') else 'cp_remaining'
+        return render({'updateIds': ['eval-update'] if key in state else []}, args), 0
     if operation == 'describe-update':
-        status = 'InProgress' if state.get('cp_remaining') else 'Successful'
+        if option(args, '--nodegroup-name'):
+            if 'mng_remaining' not in state or option(args, '--update-id') != 'eval-update':
+                raise ValueError('unknown nodegroup update')
+            updating = mng_updating(state)
+        else:
+            updating = bool(state.get('cp_remaining'))
+        status = 'InProgress' if updating else 'Successful'
         return render({'update': {'id': 'eval-update', 'status': status, 'errors': []}}, args), 0
     if operation == 'list-fargate-profiles':
-        return render({'fargateProfileNames': ['demo-system']}, args), 0
+        return render({'fargateProfileNames': ['demo-system'] if scenario['topology']['fargate'] else []}, args), 0
     if operation == 'describe-fargate-profile':
         return render({'fargateProfile': {'fargateProfileName': 'demo-system',
             'status': 'ACTIVE', 'selectors': [{'namespace': 'kube-system'}]}}, args), 0
     raise ValueError('aws operation')
 
 
-def node(name, version, labels):
+def mng_updating(state):
+    return tick(state, 'mng_remaining', {
+        'node_version': state.get('node_target', state['node_version']),
+        'mng_release': state.get('mng_release_target', state['ami_alias'])})
+
+
+def describe_addon(args, state, scenario):
+    name = option(args, '--addon-name')
+    addon = state['addons'][name]
+    queue = state.get('addon_queue', [])
+    updating = addon['polls'] > 0
+    addon['polls'] = max(0, addon['polls'] - 1)
+    if queue and name == queue[0] and not updating:
+        queue.pop(0)
+        if queue:
+            state['addons'][queue[0]]['polls'] = scenario['transitions']['addon_polls'] - 1
+    return render({'addon': {'addonName': name, 'addonVersion': addon['version'],
+                            'status': 'UPDATING' if updating else 'ACTIVE',
+                            'health': {'issues': []}}}, args), 0
+
+
+def node(name, version, labels, os_image):
     return {'apiVersion': 'v1', 'kind': 'Node', 'metadata': {'name': name, 'labels': {
         'topology.kubernetes.io/zone': 'ap-northeast-2a', **labels}}, 'spec': {},
-        'status': {'nodeInfo': {'kubeletVersion': 'v' + version + '.0'},
+        'status': {'nodeInfo': {'kubeletVersion': 'v' + version + '.0',
+                                'architecture': 'amd64', 'osImage': os_image},
                    'conditions': [{'type': 'Ready', 'status': 'True'}],
                    'allocatable': {'cpu': '4', 'memory': '8Gi', 'pods': '110'}}}
 
@@ -151,26 +181,40 @@ def deployment(name, namespace, image='example.com/demo:v1'):
         'status': {'readyReplicas': 2, 'availableReplicas': 2, 'updatedReplicas': 2}}
 
 
-def resources(kind, state):
+def worker_nodes(state):
     suffix = '-new' if state['node_version'] != state['initial_version'] else ''
     fg_suffix = '-new' if state['fargate_version'] != state['initial_version'] else ''
+    topology = state['topology']
+    labels = ({'karpenter.sh/nodepool': 'default'} if topology['karpenter'] else
+              {'eks.amazonaws.com/nodegroup': 'demo-system', 'workload': 'system', 'nodegroup': 'system'})
     nodes = [node('worker-' + x + suffix, state['node_version'],
-                  {'karpenter.sh/nodepool': 'default'}) for x in ('a', 'b')]
-    nodes += [node('fargate-system' + fg_suffix, state['fargate_version'],
-                   {'eks.amazonaws.com' + '/compute-type': 'fargate'})]
+                  labels, 'Amazon Linux 2023' if topology['mng'] else 'Bottlerocket') for x in ('a', 'b')]
+    if topology['fargate']:
+        nodes += [node('fargate-system' + fg_suffix, state['fargate_version'],
+                   {'eks.amazonaws.com' + '/compute-type': 'fargate'}, 'Amazon Linux 2')]
+    return nodes
+
+
+def resources(kind, state):
+    topology = state['topology']
+    nodes = worker_nodes(state)
+    suffix = '-new' if state['node_version'] != state['initial_version'] else ''
     if kind == 'nodes':
         return nodes
     if kind == 'pods':
         return [pod('web-' + x, 'default', nodes[i]['metadata']['name'], 'web')
                 for i, x in enumerate(('a', 'b'))] + [
-            pod('coredns-' + x, 'kube-system', nodes[2]['metadata']['name'], 'coredns')
+            pod('coredns-' + x, 'kube-system', nodes[-1]['metadata']['name'], 'coredns')
             for x in ('a', 'b')]
     if kind == 'deployments':
-        return [deployment('web', 'default'), deployment('coredns', 'kube-system'),
-                deployment('karpenter', 'karpenter', 'example.com/karpenter:1.8.3')]
+        return [deployment('web', 'default'), deployment('coredns', 'kube-system')] + (
+            [deployment('karpenter', 'karpenter', 'example.com/karpenter:1.8.3')]
+            if topology['karpenter'] else [])
     if kind == 'pdb':
         return [{'kind': 'PodDisruptionBudget', 'metadata': {'name': 'web',
             'namespace': 'default'}, 'status': {'disruptionsAllowed': 1, 'expectedPods': 2}}]
+    if kind in ('crd', 'nodeclaims', 'nodepool', 'ec2nodeclasses') and not topology['karpenter']:
+        return []
     if kind == 'crd':
         return [{'kind': 'CustomResourceDefinition', 'metadata': {'name': n}}
                 for n in ('nodeclaims.karpenter.sh', 'nodepools.karpenter.sh',
@@ -221,6 +265,37 @@ def filtered(items, args, name):
     return items
 
 
+def jsonpath_range(path, items):
+    # ponytail: items range, dotted fields and text literals only; use a parser for full JSONPath.
+    match = re.fullmatch(r'\{range \.items\[\*\]\}((?:[^{}]|\{[^{}]*\})*)\{end\}', path)
+    if not match:
+        raise ValueError('kubectl jsonpath')
+    tokens = re.split(r'(\{[^{}]*\})', match[1])
+    parts = []
+    for token in tokens:
+        if token.startswith('{'):
+            expression = token[1:-1]
+            if expression in ('"\\n"', '" "'):
+                parts.append(json.loads(expression))
+            elif re.fullmatch(r'\.[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*', expression):
+                parts.append(expression[1:].split('.'))
+            else:
+                raise ValueError('kubectl jsonpath construct: ' + expression)
+        else:
+            parts.append(token)
+    output = []
+    for item in items:
+        for part in parts:
+            if isinstance(part, str):
+                output.append(part)
+                continue
+            value = item
+            for field in part:
+                value = value[field]
+            output.append(json.dumps(value) if isinstance(value, (dict, list)) else str(value))
+    return ''.join(output)
+
+
 def kformat(items, args, named):
     fmt = option(args, '-o', '--output', default='table')
     data = items[0] if named and items else {'apiVersion': 'v1', 'kind': 'List', 'items': items}
@@ -233,7 +308,7 @@ def kformat(items, args, named):
         path = fmt[len('jsonpath='):].strip("'\"")
         if path == '{.items[*].metadata.name}':
             return ' '.join(i['metadata']['name'] for i in items)
-        raise ValueError('kubectl jsonpath')
+        return jsonpath_range(path, items)
     if fmt not in ('table', 'wide') and not fmt.startswith('custom-columns='):
         raise ValueError('kubectl output')
     labels = '--show-labels' in args
@@ -285,6 +360,8 @@ def kubectl(args, state, scenario):
         if len(args) < 3 or args[2].split('/')[0] not in ('deployment', 'deploy') \
                 or target not in ('coredns', 'karpenter'):
             raise ValueError('kubectl rollout target')
+        if not scenario['topology']['fargate']:
+            return f'deployment.apps/{target} restarted', 0
         state['fargate_version'] = state['version']
         state['fargate_restarts'] = state.get('fargate_restarts', 0) + 1
         state['last_effects'] = ['fargate_restart']
@@ -303,6 +380,8 @@ def kubectl(args, state, scenario):
     resource, _, embedded_name = positionals[0].partition('/')
     kind = ALIASES.get(resource, resource)
     name = embedded_name or (positionals[1] if len(positionals) > 1 else '')
+    if kind in ('nodeclaims', 'nodepool', 'ec2nodeclasses') and not scenario['topology']['karpenter']:
+        return '', 1
     if kind in ('nodes', 'nodeclaims') and 'node_remaining' in state:
         tick(state, 'node_remaining', {'node_version': state['node_target']})
     items = filtered(resources(kind, state), args, name)
@@ -327,8 +406,13 @@ def plan(project, args, state):
         changes.append({'address': 'module.eks.aws_eks_cluster.this[0]', 'type': 'aws_eks_cluster',
             'change': {'actions': ['update'], 'before': {'version': state['version']},
                        'after': {'version': version}}})
-    alias = values.get('eks_node_ami_alias_bottlerocket', state['ami_alias'])
-    if alias != state['ami_alias'] and (not targets or any('karpenter_default_node_class' in t for t in targets)):
+    alias_key = 'eks_node_ami_alias_al2023' if state['topology']['mng'] else 'eks_node_ami_alias_bottlerocket'
+    alias = values.get(alias_key, state['ami_alias'])
+    if state['topology']['mng'] and alias != state['ami_alias'] and (not targets or any(t.startswith('module.eks') for t in targets)):
+        changes.append({'address': 'module.eks.module.eks_managed_node_group["system-node"].aws_eks_node_group.this[0]',
+            'type': 'aws_eks_node_group', 'change': {'actions': ['update'],
+                'before': {'ami_alias': state['ami_alias']}, 'after': {'ami_alias': alias}}})
+    if state['topology']['karpenter'] and alias != state['ami_alias'] and (not targets or any('karpenter_default_node_class' in t for t in targets)):
         changes.append({'address': 'kubectl_manifest.karpenter_default_node_class',
             'type': 'kubectl_manifest', 'change': {'actions': ['update'],
                 'before': {'ami_alias': state['ami_alias']}, 'after': {'ami_alias': alias}}})
@@ -336,22 +420,36 @@ def plan(project, args, state):
 
 
 def apply_changes(changes, state, scenario):
-    # ponytail: one CP + one Karpenter pool; add per-resource transitions for MNG/409 scenarios.
+    # ponytail: one CP and one worker pool; use per-resource transitions for multi-pool scenarios.
     transitions = scenario['transitions']
     effects = []
     for entry in changes:
         after = entry['change']['after']
         if entry['type'] == 'aws_eks_cluster':
             state.update(cp_target=after['version'], status='UPDATING',
-                         cp_remaining=transitions['cp_polls'])
-            for addon in state['addons'].values():
-                addon['polls'] = transitions['addon_polls']
+                         cp_remaining=transitions['cp_polls'] - int(transitions.get('cp_409', False)))
+            if transitions.get('addon_sequential'):
+                state['addons_pending'] = True
+            else:
+                for addon in state['addons'].values():
+                    addon['polls'] = transitions['addon_polls']
             effects.append('control_plane')
+        elif entry['type'] == 'aws_eks_node_group':
+            state.setdefault('mng_release', state['ami_alias'])
+            state['mng_release_target'] = after['ami_alias']
+            state.update(ami_alias=after['ami_alias'], node_target=state['version'],
+                         mng_remaining=transitions['node_polls'])
+            effects.extend(['node_replacement', 'mng_rollout'])
         elif entry['type'] == 'kubectl_manifest':
             state.update(ami_alias=after['ami_alias'], node_target=state['version'],
                          node_remaining=transitions['node_polls'])
             effects.append('node_replacement')
     state['last_effects'] = effects
+
+
+def cp_conflict():
+    return ('Error: updating EKS Cluster demo-eks: ResourceInUseException: HTTP 409: '
+            'Cannot VersionUpdate because cluster demo-eks currently has update eval-update in progress')
 
 
 def terraform(args, state, scenario, project):
@@ -378,9 +476,21 @@ def terraform(args, state, scenario, project):
         data = json.loads((project / paths[0]).read_text()) if paths else state.get('last_plan', {})
         return json.dumps(data), 0
     if operation == 'apply':
+        if scenario['transitions'].get('cp_409') and state['status'] == 'UPDATING':
+            state['last_error'] = cp_conflict()
+            return '', 1
         paths = [v for v in args[1:] if not v.startswith('-')]
         data = json.loads((project / paths[0]).read_text()) if paths else plan(project, args, state)
-        apply_changes(data['resource_changes'], state, scenario)
+        changes = data['resource_changes']
+        # Saved CP plans also become a no-op once EKS accepted the requested version.
+        changes = [c for c in changes if c['type'] != 'aws_eks_cluster' or
+                   c['change']['after']['version'] != state.get('cp_target', state['version'])]
+        apply_changes(changes, state, scenario)
+        if scenario['transitions'].get('cp_409') and 'control_plane' in state['last_effects']:
+            state['last_error'] = cp_conflict()
+            return '', 1
+        if scenario['transitions'].get('cp_409') and not changes and state.get('cp_target') == state['version']:
+            state['last_effects'].append('cp_sync')
         return f"Apply complete! Resources: 0 added, {len(data['resource_changes'])} changed, 0 destroyed.", 0
     raise ValueError('terraform operation')
 
@@ -405,17 +515,20 @@ def main():
         scenario = json.loads((run / 'scenario.json').read_text())
         audit = run / 'project' / 'audit.log'
         audit_lines = len(audit.read_text().splitlines()) if audit.exists() else 0
+        cp_status, cp_version = state['status'], state['version']
         state['last_effects'] = []
+        state['last_error'] = ''
         error = ''
         try:
             output, code = dispatch(tool, args, state, scenario)
             if code:
-                error = 'shim: resource not found'
+                error = state['last_error'] or 'shim: resource not found'
         except (ValueError, KeyError, IndexError, OSError) as exc:
             output, code, error = '', 1, 'shim: unsupported: ' + str(exc)
         (run / 'state.json').write_text(json.dumps(state, indent=2))
         entry = {'ts': datetime.now(timezone.utc).isoformat(), 'tool': tool, 'argv': args,
                  'cwd': os.getcwd(), 'exit': code, 'stderr': error,
+                 'cp_status': cp_status, 'cp_version': cp_version,
                  'audit_lines': audit_lines, 'effects': state['last_effects']}
         with (run / 'calls.jsonl').open('a') as log:
             log.write(json.dumps(entry) + '\n')

@@ -182,12 +182,16 @@ def test_grading_recorded_fixture_and_detects_missing_safety_evidence(tmp_path):
 
 
 @pytest.mark.eval_live
-def test_live_normal_karpenter_fargate():
+@pytest.mark.parametrize('scenario_path', sorted(SCENARIO.parent.glob('*.json')),
+                         ids=lambda p: json.loads(p.read_text())['id'])
+def test_live_scenario(scenario_path):
     parent = REPO / 'evals/runs'
     parent.mkdir(exist_ok=True)
-    run = parent / ('normal-' + time.strftime('%Y%m%dT%H%M%S') + '-' + str(os.getpid()))
-    run_live(run, json.loads(SCENARIO.read_text()), model='claude-opus-5-5')
+    run = parent / (scenario_path.stem + '-' + time.strftime('%Y%m%dT%H%M%S') + '-' + str(os.getpid()))
+    run_live(run, json.loads(scenario_path.read_text()), model='claude-opus-5-5')
     print('Eval artifacts:', run)
+    if json.loads((run / 'grade.json').read_text()).get('excluded_from_pass_rate'):
+        pytest.skip('infra_error: API/network failure; excluded from skill results')
     # Skill assertion FAIL is valid baseline evidence; shim gaps are harness defects.
     assert not any('shim: unsupported' in c['stderr'] for c in read_jsonl(run / 'calls.jsonl'))
     assert json.loads((run / 'summary.json').read_text())['stop_reason'] == 'done'
@@ -205,7 +209,7 @@ def test_runner_resume_invalid_answer_and_artifacts(sandbox, monkeypatch, tmp_pa
     monkeypatch.setattr(runner.shutil, 'which', lambda name: '/synthetic/claude')
     commands = []
     replies = iter(['계획서를 승인하시겠습니까?', 'approve-plan',
-                    '답안지에 없는 질문', 'NONE', '완료\nEVAL_DONE'])
+                    '답안지에 없는 질문', 'NONE', 'NONE', '완료\nEVAL_DONE'])
 
     def fake_invoke(cmd, child_env, project, output, deadline):
         commands.append(cmd)
@@ -220,13 +224,13 @@ def test_runner_resume_invalid_answer_and_artifacts(sandbox, monkeypatch, tmp_pa
     runner.run_live(run, scenario)
     assert '--resume' not in commands[0]
     assert commands[2][commands[2].index('--resume') + 1] == 'test-session'
-    assert commands[2][2] == '승인' and commands[4][2] == INVALID
+    assert commands[2][2] == '승인' and commands[5][2] == INVALID
     assert commands[0][commands[0].index('--model') + 1] == 'claude-opus-5-5'
     users = read_jsonl(run / 'user.jsonl')
-    assert [u['status'] for u in users] == ['SENT', 'INVALID']
+    assert [u['status'] for u in users] == ['SENT', 'RETRY', 'INVALID']
     summary = json.loads((run / 'summary.json').read_text())
     assert summary['turns'] == 3 and summary['stop_reason'] == 'done'
-    assert summary['total_cost_usd'] == 0.05 and summary['tokens']['input_tokens'] == 50
+    assert summary['total_cost_usd'] == 0.06 and summary['tokens']['input_tokens'] == 60
     for name in ('calls.jsonl', 'audit.log', 'turns', 'user.jsonl', 'grade.json'):
         assert (run / name).exists()
     assert json.loads((run / 'grade.json').read_text())['upgrade_apply_observed']['result'] == 'FAIL'
@@ -271,3 +275,15 @@ def test_kubectl_label_columns_and_karpenter_restart_seen_in_live_run(sandbox):
     cli(sandbox, 'kubectl', 'get', 'nodes', '-L', 'karpenter.sh/nodepool')
     result = cli(sandbox, 'kubectl', 'rollout', 'restart', 'deployment/karpenter', '-n', 'karpenter')
     assert result.stdout.strip() == 'deployment.apps/karpenter restarted'
+
+
+def test_accounting_cost_is_cumulative_within_one_stream(tmp_path):
+    # Live run mng-rolling 2026-11-21: one turn emitted 5 result events (1.04 … 1.53 cumulative).
+    for name in ('turns', 'fake-user'):
+        (tmp_path / name).mkdir()
+    events = [{'type': 'result', 'total_cost_usd': c, 'usage': {'output_tokens': 1}} for c in (1.04, 1.06, 1.53)]
+    (tmp_path / 'turns/01.jsonl').write_text('\n'.join(json.dumps(e) for e in events) + '\n')
+    (tmp_path / 'turns/02.jsonl').write_text(json.dumps({'type': 'result', 'total_cost_usd': 0.5}) + '\n')
+    summary = accounting(tmp_path, time.monotonic(), 2, 'done')
+    assert round(summary['total_cost_usd'], 2) == 2.03
+    assert summary['tokens']['output_tokens'] == 3
