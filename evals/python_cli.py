@@ -11,8 +11,18 @@ args = sys.argv[1:]
 started = datetime.now(timezone.utc).isoformat()
 audit = run / 'project/audit.log'
 audit_lines = len(audit.read_text().splitlines()) if audit.exists() else 0
+if args and Path(args[0]).name == 'gate_check.py':
+    with (run / 'state.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        scenario = json.loads((run / 'scenario.json').read_text())
+        if scenario['transitions'].get('preflight_blocks'):
+            state = json.loads((run / 'state.json').read_text())
+            count = state.get('preflight_runs', 0)
+            state['pdb_remaining'] = int(count < scenario['transitions']['preflight_blocks'])
+            state['preflight_runs'] = count + 1
+            (run / 'state.json').write_text(json.dumps(state))
 result = subprocess.run([sys.executable, *args], check=False)
-if args and Path(args[0]).name == 'phase_gate.py':
+if args and Path(args[0]).name in ('phase_gate.py', 'gate_check.py'):
     with (run / 'state.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         with (run / 'calls.jsonl').open('a') as log:

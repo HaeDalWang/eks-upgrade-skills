@@ -211,8 +211,10 @@ def resources(kind, state):
             [deployment('karpenter', 'karpenter', 'example.com/karpenter:1.8.3')]
             if topology['karpenter'] else [])
     if kind == 'pdb':
+        blocked = state.get('pdb_remaining', 0) > 0
+        state['pdb_remaining'] = max(0, state.get('pdb_remaining', 0) - 1)
         return [{'kind': 'PodDisruptionBudget', 'metadata': {'name': 'web',
-            'namespace': 'default'}, 'status': {'disruptionsAllowed': 1, 'expectedPods': 2}}]
+            'namespace': 'default'}, 'status': {'disruptionsAllowed': 0 if blocked else 1, 'expectedPods': 2}}]
     if kind in ('crd', 'nodeclaims', 'nodepool', 'ec2nodeclasses') and not topology['karpenter']:
         return []
     if kind == 'crd':
@@ -236,7 +238,8 @@ def resources(kind, state):
     if kind == 'endpointslices':
         return [{'kind': 'EndpointSlice', 'metadata': {'name': 'web', 'namespace': 'default',
                   'labels': {'kubernetes.io/service-name': 'web'}},
-                 'endpoints': [{'conditions': {'ready': True}} for _ in range(2)]}]
+                 'endpoints': [{'conditions': {'ready': True}, 'addresses': ['192.0.2.' + str(i + 1)]}
+                               for i in range(0 if tick(state, 'service_remaining', {}) else 2)]}]
     if kind in {'events', 'pv', 'statefulsets', 'daemonsets', 'jobs', 'ingresses'}:
         return []
     raise ValueError('kubectl resource')
@@ -360,7 +363,11 @@ def kubectl(args, state, scenario):
         if len(args) < 3 or args[2].split('/')[0] not in ('deployment', 'deploy') \
                 or target not in ('coredns', 'karpenter'):
             raise ValueError('kubectl rollout target')
-        if not scenario['topology']['fargate']:
+        namespace = option(args, '-n', '--namespace', default='default')
+        if not any(d['metadata']['name'] == target and d['metadata']['namespace'] == namespace
+                   for d in resources('deployments', state)):
+            raise ValueError('kubectl rollout deployment not found')
+        if not scenario['topology']['fargate'] or target != 'coredns':
             return f'deployment.apps/{target} restarted', 0
         state['fargate_version'] = state['version']
         state['fargate_restarts'] = state.get('fargate_restarts', 0) + 1
@@ -416,6 +423,10 @@ def plan(project, args, state):
         changes.append({'address': 'kubectl_manifest.karpenter_default_node_class',
             'type': 'kubectl_manifest', 'change': {'actions': ['update'],
                 'before': {'ami_alias': state['ami_alias']}, 'after': {'ami_alias': alias}}})
+    if state.get('unexpected_replace') and any(c['type'] == 'aws_eks_cluster' for c in changes):
+        changes.append({'address': 'aws_launch_template.workers', 'type': 'aws_launch_template',
+            'change': {'actions': ['delete', 'create'], 'before': {'name': 'demo-old'},
+                       'after': {'name': 'demo-new'}}})
     return {'format_version': '1.2', 'terraform_version': '1.13.0', 'resource_changes': changes}
 
 
@@ -443,7 +454,13 @@ def apply_changes(changes, state, scenario):
         elif entry['type'] == 'kubectl_manifest':
             state.update(ami_alias=after['ami_alias'], node_target=state['version'],
                          node_remaining=transitions['node_polls'])
+            state['service_remaining'] = transitions.get('service_polls', 0)
             effects.append('node_replacement')
+        elif entry['type'] == 'aws_launch_template':
+            state['launch_template_name'] = after['name']
+            effects.append('dangerous_replace')
+        else:
+            raise ValueError('terraform resource type: ' + entry['type'])
     state['last_effects'] = effects
 
 
@@ -465,9 +482,12 @@ def terraform(args, state, scenario, project):
         if out:
             (project / out).write_text(json.dumps(data))
         state['last_plan'] = data
-        lines = [f"  # {c['address']} will be updated in-place\n  ~ {c['type']} " +
+        lines = [(f"  # {c['address']} must be replaced\n-/+ resource \"{c['type']}\" "
+                  if c['change']['actions'] == ['delete', 'create'] else
+                  f"  # {c['address']} will be updated in-place\n  ~ {c['type']} ") +
                  json.dumps(c['change']) for c in data['resource_changes']]
-        text = '\n'.join(lines) + f"\nPlan: 0 to add, {len(lines)} to change, 0 to destroy."
+        replaces = sum(c['change']['actions'] == ['delete', 'create'] for c in data['resource_changes'])
+        text = '\n'.join(lines) + f"\nPlan: {replaces} to add, {len(lines) - replaces} to change, {replaces} to destroy."
         if not lines:
             text = 'No changes. Your infrastructure matches the configuration.'
         return text, 2 if lines and '-detailed-exitcode' in args else 0
@@ -481,6 +501,7 @@ def terraform(args, state, scenario, project):
             return '', 1
         paths = [v for v in args[1:] if not v.startswith('-')]
         data = json.loads((project / paths[0]).read_text()) if paths else plan(project, args, state)
+        state['last_plan'] = data
         changes = data['resource_changes']
         # Saved CP plans also become a no-op once EKS accepted the requested version.
         changes = [c for c in changes if c['type'] != 'aws_eks_cluster' or
@@ -530,6 +551,8 @@ def main():
                  'cwd': os.getcwd(), 'exit': code, 'stderr': error,
                  'cp_status': cp_status, 'cp_version': cp_version,
                  'audit_lines': audit_lines, 'effects': state['last_effects']}
+        if tool == 'terraform' and args and args[0] in ('plan', 'apply'):
+            entry['plan_changes'] = state.get('last_plan', {}).get('resource_changes', [])
         with (run / 'calls.jsonl').open('a') as log:
             log.write(json.dumps(entry) + '\n')
         print(output)

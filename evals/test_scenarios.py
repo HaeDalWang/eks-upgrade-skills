@@ -211,3 +211,10 @@ def test_normal_grading_fixture_is_identical_to_baseline(tmp_path):
     shutil.copytree(fixture, tmp_path, dirs_exist_ok=True)
     (tmp_path / 'audit.txt').rename(tmp_path / 'audit.log')
     assert grade(tmp_path) == json.loads((fixture / 'expected-grade.json').read_text())
+
+
+@pytest.mark.parametrize('name', ['cp-409', 'addon-sequential', 'mng-rolling'])
+def test_batch1_grading_identical_to_8b75581_snapshot(tmp_path, name):
+    handwritten_fixture(tmp_path, name)
+    expected = json.loads((Path(__file__).parent / 'fixtures/batch1-expected-grade.json').read_text())
+    assert grade(tmp_path) == expected[name]

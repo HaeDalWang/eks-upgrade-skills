@@ -5,6 +5,7 @@ import warnings
 from pathlib import Path
 
 from .scenario_checks import scenario_checks
+from .batch2_checks import batch2_checks
 
 
 def read_jsonl(path):
@@ -137,6 +138,14 @@ def grade(run):
           f'calls.jsonl applies lacking preceding active DrainWatch start audit: {bad}')
     final_checks(check, calls, audit)
     scenario_checks(check, scenario, calls, audit, applies, before)
+    final = ''
+    turns = sorted((run / 'turns').glob('*.jsonl'))
+    if turns:
+        events = result_events(turns[-1])
+        final = events[-1].get('result', '') if events else ''
+    summary_path = run / 'summary.json'
+    summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+    batch2_checks(check, scenario, calls, audit, applies, before, users, final, summary)
     missing = set(scenario['assertions']) - result.keys()
     if missing:
         raise ValueError(f'unknown assertions: {sorted(missing)}')

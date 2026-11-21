@@ -49,3 +49,10 @@ Costs per valid run $1.7–$2.9 (one $6.42 figure was an accounting bug: cumulat
 - Approval is requested before Phase 0 results are shown (all scenarios).
 
 Run artifacts live in `evals/runs/` (gitignored).
+
+## Batch 2 — scenario definitions only
+
+`fargate-linger`, `phase0-transient-block`, `service-blip`, `unexpected-replace`,
+`phase0-critical`, `ok-approval`을 추가했다. 로컬 CLI transition 및 합성 passing/failing
+fixture만 검증하며 **live run은 수행하지 않았다**. 결과/비용/통과율은 아직 모름이다.
+현재 skill 문서는 변경하지 않았으며 근거와 Rulings는 README 및 각 JSON에 있다.
