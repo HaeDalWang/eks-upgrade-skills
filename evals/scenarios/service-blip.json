@@ -51,6 +51,12 @@
       "id": "context",
       "when": "인증이나 Terraform 경로, 구성 정보를 추가로 물을 때",
       "answer_text": "현재 디렉토리가 TF_DIR입니다. auth_prefix와 tf_var_file은 없습니다. Karpenter만 있고 MNG와 Fargate는 없습니다."
+    },
+    {
+      "id": "continue-after-recovery",
+      "when": "서비스 ready 엔드포인트가 0개로 떨어졌다가 복구된 뒤, 업그레이드를 계속 진행할지 승인을 물을 때",
+      "answer_text": "서비스가 복구됐으면 계속 진행하세요.",
+      "approval": true
     }
   ],
   "topology": {
