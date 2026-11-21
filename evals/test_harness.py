@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -287,3 +288,34 @@ def test_accounting_cost_is_cumulative_within_one_stream(tmp_path):
     summary = accounting(tmp_path, time.monotonic(), 2, 'done')
     assert round(summary['total_cost_usd'], 2) == 2.03
     assert summary['tokens']['output_tokens'] == 3
+
+
+def _turn_process(tmp_path, script):
+    output = tmp_path / 'turns' / '01.jsonl'
+    output.parent.mkdir(exist_ok=True)
+    process = subprocess.Popen([sys.executable, '-c', script, str(output)], start_new_session=True)
+    time.sleep(0.5)
+    return process, output
+
+
+def test_wait_turn_cuts_process_idle_after_result(tmp_path):
+    # Live run service-blip 2026-11-21T184115: agent asked, monitors kept -p alive until the 1 h limit.
+    from evals.runner import wait_turn
+    script = ('import json,sys,time; f=open(sys.argv[1],"w"); '
+              'f.write(json.dumps({"type":"result","result":"1. 계속"})+"\\n"); '
+              'f.write(json.dumps({"type":"system","subtype":"task_notification"})+"\\n"); f.flush(); time.sleep(60)')
+    process, output = _turn_process(tmp_path, script)
+    started = time.monotonic()
+    assert wait_turn(process, output, time.monotonic() + 30, idle=1) == 0
+    assert time.monotonic() - started < 10
+    assert read_jsonl(tmp_path / 'turn-cuts.jsonl')[0]['turn'] == '01.jsonl'
+
+
+def test_wait_turn_keeps_working_agent(tmp_path):
+    from evals.runner import wait_turn
+    script = ('import json,sys,time; f=open(sys.argv[1],"w"); '
+              'f.write(json.dumps({"type":"result","result":"x"})+"\\n"); '
+              'f.write(json.dumps({"type":"assistant"})+"\\n"); f.flush(); time.sleep(3); sys.exit(0)')
+    process, output = _turn_process(tmp_path, script)
+    assert wait_turn(process, output, time.monotonic() + 30, idle=1) == 0
+    assert not (tmp_path / 'turn-cuts.jsonl').exists()

@@ -137,7 +137,7 @@ def invoke(command, env, project, output, deadline):
         process = subprocess.Popen(command, cwd=project, env=env, stdin=subprocess.DEVNULL,
                                    stdout=stream, stderr=errors, start_new_session=True)
         try:
-            return process.wait(timeout=remaining)
+            return wait_turn(process, output, deadline)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGTERM)
             try:
@@ -153,6 +153,50 @@ def invoke(command, env, project, output, deadline):
 
 
 GROUPS = []
+IDLE_AFTER_RESULT = 300
+
+
+def read_events(output):
+    events = []
+    for line in output.read_text().splitlines():
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass  # partially written final line
+    return events
+
+
+def turn_finished(output):
+    """True when the last non-system stream event is a result: the agent is waiting for the user."""
+    events = [e for e in read_events(output) if e.get('type') != 'system']
+    return bool(events) and events[-1].get('type') == 'result'
+
+
+def wait_turn(process, output, deadline, idle=None):
+    # A -p process stays alive while its background monitors run, even after it asked the user.
+    # ponytail: fixed idle window after a result; use --input-format stream-json to answer a live process.
+    idle = IDLE_AFTER_RESULT if idle is None else idle
+    waiting_since = None
+    while True:
+        code = process.poll()
+        if code is not None:
+            return code
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired(process.args, 0)
+        if not turn_finished(output):
+            waiting_since = None
+        elif waiting_since is None:
+            waiting_since = time.monotonic()
+        elif time.monotonic() - waiting_since >= idle:
+            process.terminate()  # main process only: monitors keep running, as with a waiting human
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            append(output.parent.parent / 'turn-cuts.jsonl', {'turn': output.name, 'ts': now(), 'idle': idle})
+            return 0
+        time.sleep(1)
 
 
 def accounting(run, started, turns, stop):
@@ -254,7 +298,9 @@ def converse(run, scenario, claude, model, env, deadline):
             return turns, 'done'
         if turn == scenario['max_turns']:
             break
-        user = select_answer(run, scenario, claude, env, deadline, last, turn)
+        # Background wake-ups append short results after the question; the selector sees the whole turn.
+        user = select_answer(run, scenario, claude, env, deadline,
+                             '\n\n'.join(r.get('result', '') for r in results), turn)
         if user is None:
             return turns, 'fake_user_error'
         message = user['answer_text']
