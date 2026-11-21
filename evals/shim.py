@@ -42,6 +42,8 @@ def select(data, query):
         obj = data[prefix]
         return {k.strip(): obj[v.strip()] for k, v in
                 (pair.split(':') for pair in rest.rstrip('}').split(','))}
+    if query.startswith('[') and query.endswith(']'):
+        return [select(data, v.strip()) for v in query[1:-1].split(',')]
     if query.startswith('{') and query.endswith('}'):
         return {k.strip(): select(data, v.strip()) for k, v in
                 (pair.split(':') for pair in query[1:-1].split(','))}
@@ -309,8 +311,14 @@ def kformat(items, args, named):
         return '\n'.join(i['kind'].lower() + '/' + i['metadata']['name'] for i in items)
     if fmt.startswith('jsonpath='):
         path = fmt[len('jsonpath='):].strip("'\"")
-        if path == '{.items[*].metadata.name}':
-            return ' '.join(i['metadata']['name'] for i in items)
+        field = re.fullmatch(r'\{\.items\[\*\]((?:\.[A-Za-z_]\w*)+)\}', path)
+        if field:
+            values = []
+            for item in items:
+                for key in field[1][1:].split('.'):
+                    item = item[key]
+                values.append(str(item))
+            return ' '.join(values)
         return jsonpath_range(path, items)
     if fmt not in ('table', 'wide') and not fmt.startswith('custom-columns='):
         raise ValueError('kubectl output')
@@ -384,6 +392,10 @@ def kubectl(args, state, scenario):
     if not args or args[0] != 'get':
         raise ValueError('kubectl operation')
     positionals = kubectl_positionals(args[1:])
+    if ',' in positionals[0] and len(positionals) == 1:
+        # ponytail: multi-resource get concatenates items (no per-kind table sections).
+        kinds = [ALIASES.get(r, r) for r in positionals[0].split(',')]
+        return kformat([i for k in kinds for i in filtered(resources(k, state), args, '')], args, False), 0
     resource, _, embedded_name = positionals[0].partition('/')
     kind = ALIASES.get(resource, resource)
     name = embedded_name or (positionals[1] if len(positionals) > 1 else '')
@@ -491,6 +503,15 @@ def terraform(args, state, scenario, project):
         if not lines:
             text = 'No changes. Your infrastructure matches the configuration.'
         return text, 2 if lines and '-detailed-exitcode' in args else 0
+    if args[:2] == ['state', 'list']:
+        addresses = ['module.eks.aws_eks_cluster.this[0]']
+        if scenario['topology']['mng']:
+            addresses.append('module.eks.module.eks_managed_node_group["system-node"].aws_eks_node_group.this[0]')
+        if scenario['topology']['karpenter']:
+            addresses.append('kubectl_manifest.karpenter_default_node_class')
+        if state.get('unexpected_replace'):
+            addresses.append('aws_launch_template.workers')
+        return '\n'.join(addresses), 0
     if operation == 'show' and '-json' in args:
         paths = [v for v in args[1:] if not v.startswith('-')]
         data = json.loads((project / paths[0]).read_text()) if paths else state.get('last_plan', {})

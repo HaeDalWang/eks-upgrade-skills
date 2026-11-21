@@ -155,3 +155,22 @@ def test_describe_nodegroup_health_query_seen_in_live_run(sandbox):
         '{status:nodegroup.status, version:nodegroup.version, release:nodegroup.releaseVersion, health:nodegroup.health}',
         '--output', 'json')
     assert json.loads(result.stdout)['health'] == {'issues': []}
+
+
+@pytest.mark.parametrize('argv', [
+    # Batch-2 live runs 2026-11-21 (unexpected-replace, ok-approval, phase0-transient-block, service-blip).
+    ['terraform', 'state', 'list'],
+    ['aws', 'eks', 'describe-addon', '--cluster-name', 'demo-eks', '--addon-name', 'vpc-cni',
+     '--query', '[addon.addonName,addon.addonVersion,addon.status]', '--output', 'text'],
+    ['kubectl', 'get', 'deploy,pods', '-n', 'default', '-o', 'wide'],
+    ['kubectl', 'get', 'nodes', '-o', 'jsonpath={.items[*].status.nodeInfo.kubeletVersion}'],
+])
+def test_batch2_live_argv_supported(sandbox, argv):
+    result = cli(sandbox, *argv)
+    assert result.returncode == 0 and result.stdout.strip()
+
+
+def test_describe_addon_list_query_text(sandbox):
+    out = cli(sandbox, 'aws', 'eks', 'describe-addon', '--cluster-name', 'demo-eks', '--addon-name',
+              'vpc-cni', '--query', '[addon.addonName,addon.addonVersion,addon.status]', '--output', 'text').stdout
+    assert out.split('\t')[0] == 'vpc-cni'
