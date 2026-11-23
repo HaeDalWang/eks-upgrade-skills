@@ -37,7 +37,8 @@ def make_plan(major=21, mng=True, karpenter=False, fargate=False, version_ref="v
                       "values": {"yaml_body": body}})
         values["node_alias"] = "bottlerocket@1.46.0"
     values.update(variables or {})
-    return {"configuration": {"root_module": {"module_calls": {"eks": {
+    return {"configuration": {"root_module": {"variables": {k: {"default": v} for k, v in values.items()},
+                                              "module_calls": {"eks": {
                 "source": "terraform-aws-modules/eks/aws",
                 "version_constraint": "~> {}.0".format(major), "expressions": expressions}}}},
             "prior_state": {"values": {"root_module": {"resources": state[:1], "child_modules": [
@@ -282,3 +283,69 @@ def test_missing_cli_exits_127(project, monkeypatch, capsys):
     monkeypatch.setattr(discover.shutil, "which", lambda tool: None if tool == "terraform" else "/bin/x")
     assert discover.main(["--target-version", "1.34"]) == 127
     assert "NEXT: STOP terraform" in capsys.readouterr().out
+
+
+def mng_set_in(project, monkeypatch, plan=None):
+    code, doc, _ = run(monkeypatch, Fake(plan or make_plan()))
+    return code, doc
+
+
+def test_f2_discovery_audit_line_records_sha256_and_cluster(project, monkeypatch):
+    import hashlib
+    _, doc, audit = run(monkeypatch, Fake(make_plan()))
+    sha = hashlib.sha256((project / "discovery.json").read_bytes()).hexdigest()
+    assert f"sha256={sha}" in audit[0]["detail"] and "cluster_name=demo-eks" in audit[0]["detail"]
+
+
+@pytest.mark.parametrize("filename,content", [
+    ("terraform.tfvars.json", '{"eks_node_ami_alias_al2023": "1.33.0-20261101"}'),
+    ("prod.auto.tfvars.json", '{"eks_node_ami_alias_al2023": "1.33.0-20261101"}'),
+    ("zz.auto.tfvars", 'eks_node_ami_alias_al2023="1.33.0-20261101"\n')])
+def test_f3_json_and_compact_assignments_are_found_not_called_default(project, monkeypatch, filename, content):
+    (project / "infra" / filename).write_text(content)
+    code, doc = mng_set_in(project, monkeypatch)
+    assert code == 0 and doc["mng"]["ami_variable_set_in"] == str(project / "infra" / filename)
+
+
+def test_f3_auto_tfvars_json_beats_terraform_tfvars_json(project, monkeypatch):
+    for name in ("terraform.tfvars.json", "a.auto.tfvars.json"):
+        (project / "infra" / name).write_text('{"eks_node_ami_alias_al2023": "x"}')
+    _, doc = mng_set_in(project, monkeypatch)
+    assert doc["mng"]["ami_variable_set_in"].endswith("a.auto.tfvars.json")
+
+
+def test_f3_tf_var_env_is_a_source(project, monkeypatch):
+    monkeypatch.setenv("TF_VAR_eks_node_ami_alias_al2023", "1.33.0-20261101")
+    _, doc = mng_set_in(project, monkeypatch)
+    assert doc["mng"]["ami_variable_set_in"] == "env:TF_VAR_eks_node_ami_alias_al2023"
+
+
+def test_f3_unlocatable_source_is_unknown_with_reason_never_default(project, monkeypatch):
+    plan = make_plan()
+    plan["configuration"]["root_module"]["variables"]["eks_node_ami_alias_al2023"]["default"] = "other"
+    code, doc = mng_set_in(project, monkeypatch, plan)
+    assert code == 2 and doc["mng"]["ami_variable_set_in"] == "unknown"
+    assert any(u["field"] == "mng.ami_variable_set_in" and "differs from the declared default" in u["reason"]
+               for u in doc["unknowns"])
+    plan["configuration"]["root_module"]["variables"].pop("eks_node_ami_alias_al2023")
+    _, doc = mng_set_in(project, monkeypatch, plan)
+    assert doc["mng"]["ami_variable_set_in"] == "unknown"
+
+
+def test_f3_unparseable_json_tfvars_is_unknown(project, monkeypatch):
+    (project / "infra" / "terraform.tfvars.json").write_text("{broken")
+    _, doc = mng_set_in(project, monkeypatch)
+    assert doc["mng"]["ami_variable_set_in"] == "unknown"
+
+
+@pytest.mark.parametrize("replacement", ["module.eks[0].", 'module.eks["main"].'])
+def test_f4_counted_or_for_each_eks_module_resources_are_matched(project, monkeypatch, replacement):
+    plan = json.loads(json.dumps(make_plan()).replace("module.eks.", json.dumps(replacement)[1:-1]))
+    code, doc, _ = run(monkeypatch, Fake(plan))
+    assert code == 0 and doc["node_pools"] == ["MNG"] and doc["cluster_name"] == "demo-eks"
+    assert doc["mng"]["present"] and doc["mng"]["ami_variable"] == "eks_node_ami_alias_al2023"
+
+
+def test_f4_a_module_with_a_longer_name_is_not_the_eks_module():
+    assert discover.under("module.eks[0].aws_eks_cluster.this[0]", "module.eks")
+    assert not discover.under("module.eks_other.aws_eks_cluster.this", "module.eks")

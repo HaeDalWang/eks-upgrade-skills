@@ -8,6 +8,12 @@ import upgrade_plan as up
 from lib import audit_append
 
 
+def seed_preflight(audit, cluster="demo", target="1.35", phase0="PASS"):
+    """The audit.log lines discover.py and gate_check.py write before approval."""
+    audit_append(str(audit), "DISCOVERY", "PASS", up.detail_fields(cluster_name=cluster, sha256="x"))
+    audit_append(str(audit), "PHASE0", phase0, "gate_check result cluster_name={} target_version={}".format(cluster, target))
+
+
 def make_plan(tmp_path, order=None, pools=(), language="ko", expected=None, approve=True):
     """Create CLI plans or equivalent custom test plans, with independent step ids."""
     path = tmp_path / "upgrade-plan.json"
@@ -18,6 +24,7 @@ def make_plan(tmp_path, order=None, pools=(), language="ko", expected=None, appr
                steps=[dict(id=s, type=s, targets=[], expect=(expected or {}).get(s, {})) for s in order],
                deviations=[] if order == up.default_order(pools) else [{"reason": "test order"}])
     path.write_text(json.dumps(doc))
+    seed_preflight(audit)
     if approve:
         assert up.main(["approve", "--plan-doc", str(path), "--audit-log", str(audit),
                         "--answer", "승인" if language == "ko" else "approve"]) == 0
@@ -69,10 +76,10 @@ def test_only_exact_language_approval_words(tmp_path, language, answer, code, ca
     path, audit = make_plan(tmp_path, language=language, approve=False)
     assert invoke("approve", path, audit, "--answer", answer) == code
     if code:
-        assert not audit.exists()
+        assert not any(r["rule_id"] == "PLAN-APPROVED" for r in up.records(audit))
         assert capsys.readouterr().out.endswith("NEXT: ASK_USER exact approval word required\n")
     else:
-        assert up.fields(up.records(audit)[0]["detail"])["sha256"] == up.load(path)[2]
+        assert up.fields(up.records(audit)[-1]["detail"])["sha256"] == up.load(path)[2]
 
 
 def test_done_only_current_step_with_guard_after_previous_completion(tmp_path):
@@ -286,12 +293,21 @@ def discovery_file(tmp_path, **override):
     found.update(override)
     path = tmp_path / "discovery.json"
     path.write_text(json.dumps(found))
+    record_discovery(tmp_path, path)
     return path
+
+
+def record_discovery(tmp_path, path, result="PASS"):
+    """The DISCOVERY line discover.py writes for exactly this file."""
+    import hashlib
+    audit_append(str(tmp_path / "audit.log"), "DISCOVERY", result, up.detail_fields(
+        cluster_name=json.loads(path.read_text())["cluster_name"],
+        sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
 
 
 def test_create_from_discovery_fills_pools_targets_and_ami_expectations(tmp_path):
     path = tmp_path / "upgrade-plan.json"
-    assert up.main(["create", "--plan-doc", str(path), "--discovery", str(discovery_file(tmp_path)),
+    assert up.main(["create", "--plan-doc", str(path), "--discovery", str(discovery_file(tmp_path)), "--audit-log", str(tmp_path / "audit.log"),
                     "--output-language", "ko"]) == 0
     doc = json.loads(path.read_text())
     assert (doc["cluster"], doc["current_version"], doc["target_version"]) == ("demo", "1.34", "1.35")
@@ -308,7 +324,7 @@ def test_create_from_discovery_fills_pools_targets_and_ami_expectations(tmp_path
 
 def test_create_cli_flags_override_discovery(tmp_path):
     path = tmp_path / "upgrade-plan.json"
-    assert up.main(["create", "--plan-doc", str(path), "--discovery", str(discovery_file(tmp_path)),
+    assert up.main(["create", "--plan-doc", str(path), "--discovery", str(discovery_file(tmp_path)), "--audit-log", str(tmp_path / "audit.log"),
                     "--output-language", "en", "--cluster-name", "other", "--node-pool", "Karpenter",
                     "--expect", "karpenter:node_alias=bottlerocket@1.48.0",
                     "--expect", "karpenter:alias=bottlerocket@1.48.0"]) == 0
@@ -320,16 +336,86 @@ def test_create_cli_flags_override_discovery(tmp_path):
 def test_create_from_discovery_with_unknown_ami_asks_user(tmp_path, capsys):
     found = discovery_file(tmp_path, mng={"present": True, "ami_variable": None, "target_release": None})
     path = tmp_path / "upgrade-plan.json"
-    assert up.main(["create", "--plan-doc", str(path), "--discovery", str(found),
+    assert up.main(["create", "--plan-doc", str(path), "--discovery", str(found), "--audit-log", str(tmp_path / "audit.log"),
                     "--output-language", "ko"]) == 2
-    assert "NEXT: ASK_USER nodes step" in capsys.readouterr().out
+    assert "NEXT: ASK_USER plan needs values discovery left unknown: mng.target_release" in capsys.readouterr().out
     assert not path.exists()
 
 
 def test_create_refuses_stopped_discovery_and_missing_values(tmp_path, capsys):
     path = tmp_path / "upgrade-plan.json"
     found = discovery_file(tmp_path, status="stop")
-    assert up.main(["create", "--plan-doc", str(path), "--discovery", str(found),
+    assert up.main(["create", "--plan-doc", str(path), "--discovery", str(found), "--audit-log", str(tmp_path / "audit.log"),
                     "--output-language", "ko"]) == 1
     assert up.main(["create", "--plan-doc", str(path), "--output-language", "ko"]) == 1
     assert "--cluster-name is required" in capsys.readouterr().out
+
+
+def create_from(tmp_path, found, *extra):
+    return up.main(["create", "--plan-doc", str(tmp_path / "upgrade-plan.json"), "--discovery", str(found),
+                    "--audit-log", str(tmp_path / "audit.log"), "--output-language", "ko", *extra])
+
+
+@pytest.mark.parametrize("karpenter,named", [
+    ({"present": True, "node_classes": ["k.nc"], "alias_variable": None, "target_alias": "bottlerocket@1.47.0"},
+     "karpenter.alias_variable"),
+    ({"present": True, "node_classes": ["k.nc"], "alias_variable": "node_alias", "target_alias": None},
+     "karpenter.target_alias"),
+    ({"present": True, "node_classes": ["k.nc"], "alias_variable": None, "target_alias": None},
+     "karpenter.target_alias")])
+def test_f1_unknown_karpenter_alias_asks_user_instead_of_traceback(tmp_path, capsys, karpenter, named):
+    found = discovery_file(tmp_path, karpenter=karpenter, node_pools=["MNG", "Karpenter"])
+    assert create_from(tmp_path, found) == 2
+    out = capsys.readouterr().out
+    assert out.strip().splitlines()[-1].startswith("NEXT: ASK_USER") and named in out
+    assert not (tmp_path / "upgrade-plan.json").exists()
+
+
+def test_f1_unknown_mng_ami_variable_asks_user(tmp_path, capsys):
+    found = discovery_file(tmp_path, mng={"present": True, "ami_variable": None, "target_release": "1.35.0-1"})
+    assert create_from(tmp_path, found) == 2
+    assert "mng.ami_variable" in capsys.readouterr().out
+
+
+def test_f2_create_refuses_discovery_without_matching_audit_record(tmp_path, capsys):
+    found = discovery_file(tmp_path)
+    (tmp_path / "audit.log").unlink()
+    assert create_from(tmp_path, found) == 1
+    assert capsys.readouterr().out.strip().splitlines()[-1].startswith("NEXT: STOP")
+    record_discovery(tmp_path, found, result="FAIL")
+    assert create_from(tmp_path, found) == 1
+    record_discovery(tmp_path, found, result="WARN")
+    assert create_from(tmp_path, found) == 0
+    found.write_text(found.read_text().replace("1.35.0-20261121", "1.35.0-evil"))  # edited after discovery
+    (tmp_path / "upgrade-plan.json").unlink()
+    assert create_from(tmp_path, found) == 1
+
+
+def test_f2_create_lists_every_unknown_value_the_plan_needs(tmp_path, capsys):
+    found = discovery_file(tmp_path, module={"address": "unknown"}, unknowns=[
+        {"field": "mng.target_release", "reason": "SSM empty"}],
+        mng={"present": True, "ami_variable": None, "target_release": None})
+    assert create_from(tmp_path, found) == 2
+    out = capsys.readouterr().out
+    assert "module.address" in out and "mng.target_release (SSM empty)" in out
+
+
+@pytest.mark.parametrize("seed,code", [(None, 1), ("no-phase0", 1), ("fail", 1), ("other-target", 1),
+                                       ("phase0-before-discovery", 1), ("warn", 0), ("pass", 0)])
+def test_f2_approve_requires_discovery_and_phase0_without_fail(tmp_path, capsys, seed, code):
+    path, audit = make_plan(tmp_path, approve=False)
+    audit.unlink()
+    if seed == "no-phase0" or seed == "fail" or seed in ("warn", "pass"):
+        audit_append(str(audit), "DISCOVERY", "PASS", up.detail_fields(cluster_name="demo", sha256="x"))
+    if seed == "phase0-before-discovery":
+        audit_append(str(audit), "PHASE0", "PASS", "gate_check result cluster_name=demo target_version=1.35")
+        audit_append(str(audit), "DISCOVERY", "PASS", up.detail_fields(cluster_name="demo", sha256="x"))
+    if seed in ("fail", "warn", "pass", "other-target"):
+        audit_append(str(audit), "PHASE0", seed.upper() if seed in ("fail", "warn", "pass") else "PASS",
+                     "gate_check result cluster_name=demo target_version={}".format(
+                         "1.36" if seed == "other-target" else "1.35"))
+    if seed == "other-target":
+        audit_append(str(audit), "DISCOVERY", "PASS", up.detail_fields(cluster_name="demo", sha256="x"))
+    assert invoke("approve", path, audit, "--answer", "승인") == code
+    if code:
+        assert capsys.readouterr().out.strip().splitlines()[-1].startswith("NEXT: STOP")

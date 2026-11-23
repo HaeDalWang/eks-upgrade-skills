@@ -21,6 +21,7 @@ Usage:
 
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1278,7 +1279,9 @@ def main() -> None:
     print("════════════════════════════════════════════════════════════")
 
     result = "FAIL" if _gate.critical_fail else ("WARN" if _gate.high_warn else "PASS")
-    audit_write("PHASE0", result, "gate_check result")
+    # cluster/target keys let upgrade_plan.py approve find this exact result
+    audit_write("PHASE0", result, "gate_check result cluster_name={} target_version={}".format(
+        shlex.quote(args.cluster_name), shlex.quote(args.target_version)))
     audit_flush(args.audit_log)
 
     if _gate.critical_fail > 0:

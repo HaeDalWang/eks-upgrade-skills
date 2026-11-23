@@ -60,7 +60,9 @@ Never fill an `unknown` yourself. Read every name (`module.address`, `cluster_ve
 
 Run Phase 0 of [aws/terraform-eks/SKILL.md](aws/terraform-eks/SKILL.md) now, with
 `CLUSTER_NAME`, `CURRENT_VERSION`, `TARGET_VERSION`, `TF_DIR` from `discovery.json`.
-Exit 1 → show the Phase 0 remediation checklist and stop (no interview, no plan).
+Use the same `audit.log` as discovery. Exit 1 → show the Phase 0 remediation checklist and stop
+(no interview, no plan); `upgrade_plan.py approve` refuses to run without a Phase 0 result for
+this cluster/target that has no FAIL and comes after the discovery record.
 Exit 2 → the HIGH/MEDIUM findings go into the interview (1-C) for confirmation.
 
 ### 1-C: One interview message
@@ -117,14 +119,16 @@ services:
 
 ```bash
 python3 scripts/upgrade_plan.py create --discovery discovery.json \
-  --output-language "${OUTPUT_LANGUAGE}" --plan-doc upgrade-plan.json
+  --output-language "${OUTPUT_LANGUAGE}" --plan-doc upgrade-plan.json --audit-log audit.log
 ```
 
 Node pools, per-step targets and AMI expectations come from `discovery.json`. Explicit flags
 override it: `--target STEP=ADDRESS` / `--expect STEP:NAME=VALUE` replace that step's
 discovered values (use them for AMI values the user gave in the interview), `--node-pool`
-replaces the pools. Exit 2 `NEXT: ASK_USER` → a node step still lacks its AMI variable/value;
-ask, then rerun create with `--expect`.
+replaces the pools. `create --discovery` only accepts the `discovery.json` that `discover.py` just recorded in `audit.log`
+(pass the same `--audit-log`; an edited or unrecorded file → exit 1 `NEXT: STOP`, rerun discovery).
+Exit 2 `NEXT: ASK_USER` lists the values the plan needs that discovery left `unknown` (module
+address, AMI variable, target AMI, ...); ask, then rerun create with `--target`/`--expect`.
 The default apply order is cp → nodes (MNG only) → karpenter (Karpenter only) → full.
 A custom `--order cp,addon,nodes,karpenter,full` requires `--reason "..."`; deviations appear in the rendering.
 `upgrade-plan.json` is authoritative; display the generated `upgrade-plan-<cluster>-<YYYYMMDD>.md`

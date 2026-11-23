@@ -163,42 +163,90 @@ def discovery_defaults(args):
 
 
 def discovery_steps(found):
-    """Per step type: (targets, expect) derived from discovery; None values are unknowns."""
+    """Per step type: (targets, expect) derived from discovery; unknowns are left out."""
     module = (found.get("module") or {}).get("address")
     mng, karpenter = found.get("mng") or {}, found.get("karpenter") or {}
-    nodes = {mng.get("ami_variable"): mng.get("target_release"),
-             "release_version": [mng.get("target_release")]} if mng.get("present") else {}
-    classes = {karpenter.get("alias_variable"): karpenter.get("target_alias"),
-               "alias": [karpenter.get("target_alias")]} if karpenter.get("present") else {}
-    return {"cp": ([module] if module else [], {}),
-            "nodes": ([module + ".module.eks_managed_node_group"] if module else [], nodes),
+
+    def expected(facts, variable, target, resolved):
+        if not facts.get("present") or not known(target):
+            return {}
+        pairs = {resolved: [target]}
+        if known(facts.get(variable)):
+            pairs[facts[variable]] = target
+        return pairs
+
+    nodes = expected(mng, "ami_variable", mng.get("target_release"), "release_version")
+    classes = expected(karpenter, "alias_variable", karpenter.get("target_alias"), "alias")
+    return {"cp": ([module] if known(module) else [], {}),
+            "nodes": ([module + ".module.eks_managed_node_group"] if known(module) else [], nodes),
             "karpenter": (list(karpenter.get("node_classes") or []), classes),
-            "full": ([], dict(nodes, **classes))}
+            "full": ([], {**nodes, **classes})}
+
+
+def known(value):
+    return isinstance(value, str) and value not in ("", "unknown")
+
+
+def missing_values(step, found):
+    """Discovery fields a plan step still needs, as 'field (reason)' strings."""
+    reasons = {u["field"]: u["reason"] for u in found.get("unknowns") or []}
+    group = {"nodes": ("mng", "release_version", "ami_variable", "target_release"),
+             "karpenter": ("karpenter", "alias", "alias_variable", "target_alias")}.get(step["type"])
+    needs = []
+    if step["type"] in ("cp", "nodes") and not step["targets"]:
+        needs.append("module.address")
+    elif step["type"] == "karpenter" and not step["targets"]:
+        needs.append("karpenter.node_classes")
+    if group:
+        name, resolved, variable, target = group
+        if not step["expect"].get(resolved):
+            needs.append(name + "." + target)
+        elif len(step["expect"]) < 2:
+            needs.append(name + "." + variable)
+    return ["{} ({})".format(n, reasons[n]) if n in reasons else n for n in needs]
 
 
 def apply_discovery(steps, found, args):
-    """Discovery fills steps the CLI left alone; a node step without AMI expectations asks."""
+    """Discovery fills steps the CLI left alone; a step missing a value asks the user."""
     derived = discovery_steps(found)
     cli_targets = {item.partition("=")[0] for item in args.target}
     cli_expects = {item.partition(":")[0] for item in args.expect}
+    missing = []
     for step in steps:
         targets, expect = derived.get(step["type"], ([], {}))
         if step["id"] not in cli_targets:
             step["targets"] = list(targets)
         if step["id"] not in cli_expects:
-            step["expect"] = {k: v for k, v in expect.items() if k and v and v != [None]}
-        ami = {"nodes": "release_version", "karpenter": "alias"}.get(step["type"])
-        if ami and (not step["targets"] or not step["expect"].get(ami)
-                    or len(step["expect"]) < 2):
-            raise AskUser("{} step needs targets, the AMI variable and its target value "
-                          "(discovery left them unknown); pass --target/--expect".format(step["id"]))
+            step["expect"] = dict(expect)
+        missing += [m for m in missing_values(step, found) if m not in missing]
+    if missing:
+        raise AskUser("plan needs values discovery left unknown: " + "; ".join(missing)
+                      + " (answer in the interview, or pass --target/--expect)")
+
+
+def require_discovery_run(args, path):
+    """create --discovery only accepts the discovery.json that discover.py itself recorded."""
+    digest = hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
+    found = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    for row in records(args.audit_log):
+        meta = fields(row["detail"])
+        if (row["rule_id"] == "DISCOVERY" and row["result"] in ("PASS", "WARN")
+                and meta.get("sha256") == digest and meta.get("cluster_name") == found.get("cluster_name")):
+            return
+    raise ValueError("no DISCOVERY PASS/WARN record for this discovery.json sha256 in " + args.audit_log
+                     + "; run discover.py with the same --audit-log (the file was edited or never discovered)")
 
 
 def create(args):
+    if args.discovery:
+        require_discovery_run(args, args.discovery)
     found = discovery_defaults(args) if args.discovery else None
     for name in ("cluster_name", "current_version", "target_version", "tf_dir"):
-        if not nonempty(getattr(args, name)):
-            raise ValueError("--{} is required (or --discovery)".format(name.replace("_", "-")))
+        if not nonempty(getattr(args, name)) or (found is not None and not known(getattr(args, name))):
+            error = "--{} is required (or --discovery)".format(name.replace("_", "-"))
+            if found is not None:
+                raise AskUser("{} is unknown in discovery.json; pass --{}".format(name, name.replace("_", "-")))
+            raise ValueError(error)
     pools = list(dict.fromkeys(args.node_pool))
     order = args.order.split(",") if args.order else default_order(pools)
     if len(order) != len(set(order)):
@@ -250,11 +298,33 @@ def write_outputs(path, doc, md):
         raise
 
 
+def require_preflight(rows, doc):
+    """Rule: Phase 0 has no FAIL and ran after discovery, for this cluster/target, before approval."""
+    discovered = phase0 = None
+    for i, row in enumerate(rows):
+        meta = fields(row["detail"])
+        if row["rule_id"] == "DISCOVERY" and row["result"] in ("PASS", "WARN") \
+                and meta.get("cluster_name") == doc["cluster"]:
+            discovered = i
+        if row["rule_id"] == "PHASE0" and row["result"] in ("PASS", "WARN", "FAIL") \
+                and meta.get("cluster_name") == doc["cluster"] \
+                and meta.get("target_version") == doc["target_version"]:
+            phase0 = (i, row["result"])
+    if discovered is None:
+        raise ValueError("no DISCOVERY record for cluster {} in audit.log; run discover.py first".format(doc["cluster"]))
+    if phase0 is None or phase0[0] < discovered:
+        raise ValueError("no Phase 0 gate_check result after discovery for {} -> {}; run gate_check.py "
+                         "before approval".format(doc["cluster"], doc["target_version"]))
+    if phase0[1] == "FAIL":
+        raise ValueError("latest Phase 0 result is FAIL (CRITICAL); resolve it and rerun gate_check.py")
+
+
 def approve(args):
     path, doc, digest = load(args.plan_doc)
     if not exact_answer(doc, args.answer):
         return 2
     rows = records(args.audit_log)
+    require_preflight(rows, doc)
     approvals = [fields(row["detail"]) for row in rows if row["rule_id"] == "PLAN-APPROVED"
                  and row["result"] == "PASS" and fields(row["detail"]).get("plan_doc") == str(path)]
     if not approvals or approvals[-1].get("sha256") != digest:
@@ -301,8 +371,7 @@ def build_parser():
     for name in ("create", "approve", "skip", "done", "next"):
         sub = commands.add_parser(name)
         sub.add_argument("--plan-doc", default="upgrade-plan.json")
-        if name != "create":
-            sub.add_argument("--audit-log", default="audit.log")
+        sub.add_argument("--audit-log", default="audit.log")
         if name in ("approve", "skip"):
             sub.add_argument("--answer", required=True)
         if name in ("skip", "done"):

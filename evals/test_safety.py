@@ -173,5 +173,10 @@ def approve_plan(sandbox, step='cp', variable=None, ami=None):
                      '--expect', step + ':' + variable + '=' + ami])
     result = script(sandbox, 'upgrade_plan.py', *args)
     assert result.returncode == 0, result.stdout + result.stderr
+    for tool, extra in (('discover.py', ['--root', '.', '--target-version', '1.34']),
+                        ('gate_check.py', ['--cluster-name', 'demo-eks', '--current-version', '1.33',
+                                           '--target-version', '1.34'])):
+        done = script(sandbox, tool, *extra)
+        assert done.returncode in (0, 2), done.stdout + done.stderr
     result = script(sandbox, 'upgrade_plan.py', 'approve', '--answer', '승인')
     assert result.returncode == 0, result.stdout + result.stderr

@@ -2050,3 +2050,23 @@ class TestInf002AmiTypeBasedPaths:
         has_x86 = any("x86_64" in p for p in queried_paths)
         has_arm = any("arm64" in p for p in queried_paths)
         assert has_x86 and has_arm, f"Both archs should be queried: {queried_paths}"
+
+
+class TestPhase0ResultKeysClusterAndTarget:
+    """upgrade_plan.py approve finds the Phase 0 result by cluster_name and target_version."""
+
+    def test_phase0_result_line_carries_cluster_and_target(self, tmp_path):
+        log = tmp_path / "audit.log"
+        with unittest.mock.patch('sys.argv', [
+            'gate_check.py', '--cluster-name', 'test', '--current-version', '1.30',
+            '--target-version', '1.34', '--audit-log', str(log),
+        ]):
+            with unittest.mock.patch.object(gate_check, 'run_cmd') as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(
+                    [], 0, stdout="/usr/bin/kubectl", stderr="")
+                with pytest.raises(SystemExit):
+                    gate_check.main()
+        import upgrade_plan
+        rows = [r for r in upgrade_plan.records(log) if r["rule_id"] == "PHASE0" and r["result"] != "ENTER"]
+        assert [r["result"] for r in rows] == ["FAIL"]
+        assert upgrade_plan.fields(rows[0]["detail"]) == {"cluster_name": "test", "target_version": "1.34"}

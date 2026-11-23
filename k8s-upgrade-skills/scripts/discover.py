@@ -12,7 +12,9 @@ never guessed: exit 2 ``NEXT: ASK_USER``. Unsupported projects (no EKS module,
 plain aws_eks_cluster, several EKS modules) exit 1 ``NEXT: STOP``.
 """
 
+import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
@@ -189,16 +191,58 @@ def trace_variable(chain, argument):
     return None, "unreachable"
 
 
-def set_in(tf_dir, name, var_file):
-    """Highest-precedence tfvars file that assigns the variable (else its default)."""
-    files = ([tf_dir / var_file] if var_file else []) + sorted(
-        tf_dir.glob("*.auto.tfvars"), reverse=True) + [tf_dir / "terraform.tfvars"]
-    pattern = re.compile(r"(?m)^\s*{}\s*=".format(re.escape(name)))
+def assigns(path, name):
+    """True/False if the tfvars file assigns the variable; None if the file cannot be read."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if path.name.endswith(".json"):
+            data = json.loads(text)
+            return isinstance(data, dict) and name in data
+    except (OSError, ValueError):
+        return None
+    return bool(re.search(r"(?m)^\s*{}\s*=".format(re.escape(name)), text))
+
+
+def set_in(plan, tf_dir, name, var_file):
+    """(source, reason): where the variable gets its value, never guessed.
+
+    Terraform precedence, highest first (developer.hashicorp.com/terraform/language/values/
+    variables#variable-definition-precedence): -var/-var-file (our -var-file), *.auto.tfvars and
+    *.auto.tfvars.json in lexical order, terraform.tfvars.json, terraform.tfvars, TF_VAR_<name>,
+    then the variable default. "default" only if the plan value equals the declared default and
+    nothing above sets it.
+    """
+    auto = sorted(list(tf_dir.glob("*.auto.tfvars")) + list(tf_dir.glob("*.auto.tfvars.json")),
+                  key=lambda p: p.name, reverse=True)
+    files = ([tf_dir / var_file] if var_file else []) + auto + [
+        tf_dir / "terraform.tfvars.json", tf_dir / "terraform.tfvars"]
     for path in files:
-        path = path if path.is_absolute() else tf_dir / path
-        if path.is_file() and pattern.search(path.read_text(encoding="utf-8", errors="replace")):
-            return str(path)
-    return "default"
+        if not path.is_file():
+            continue
+        found = assigns(path, name)
+        if found is None:
+            return "unknown", "cannot parse {} to see whether it sets {}".format(path, name)
+        if found:
+            return str(path), ""
+    env = "TF_VAR_" + name
+    if env in os.environ:
+        return "env:" + env, ""
+    if any("-var" in os.environ.get(key, "") for key in ("TF_CLI_ARGS", "TF_CLI_ARGS_plan")):
+        return "unknown", "TF_CLI_ARGS carries -var/-var-file that discovery cannot read"
+    declared = ((plan.get("configuration") or {}).get("root_module") or {}).get("variables") or {}
+    if name in declared and "default" in (declared[name] or {}):
+        if declared[name]["default"] == variable_value(plan, name):
+            return "default", ""
+        return "unknown", "plan value {!r} differs from the declared default but no tfvars file or " \
+            "TF_VAR sets it".format(variable_value(plan, name))
+    return "unknown", "no tfvars file or TF_VAR sets {} and the plan shows no default".format(name)
+
+
+def source_of(plan, tf_dir, name, var_file, field, unknowns):
+    source, reason = set_in(plan, tf_dir, name, var_file)
+    if source == "unknown":
+        unknowns.append(unknown(field, reason))
+    return source
 
 
 def variable_value(plan, name):
@@ -218,7 +262,8 @@ def cluster_version(plan, chain, major, tf_dir, var_file, unknowns):
         unknowns.append(unknown("cluster_version.variable", reason))
         return {"argument": arguments[0], "variable": "unknown", "value": "unknown", "set_in": "unknown"}
     return {"argument": arguments[0], "variable": variable,
-            "value": variable_value(plan, variable), "set_in": set_in(tf_dir, variable, var_file)}
+            "value": variable_value(plan, variable), "set_in": source_of(plan, tf_dir, variable, var_file,
+                                "cluster_version.set_in", unknowns)}
 
 
 def unknown(field, reason):
@@ -263,9 +308,14 @@ def matching_variable(plan, values, field, label):
     return names[0], ""
 
 
+def under(address, eks_address):
+    """True if address is inside the EKS module, including count/for_each instances."""
+    return bool(re.match(r'{}(\[(?:[^\]"]|"[^"]*")+\])?\.'.format(re.escape(eks_address)), address or ""))
+
+
 def mng_facts(plan, found, eks_address, unknowns):
     groups = {a: r for a, r in found.items() if r["type"] == "aws_eks_node_group"
-              and a.startswith(eks_address + ".")}
+              and under(a, eks_address)}
     facts = {"present": bool(groups), "node_groups": sorted(groups), "ami_variable": None,
              "ami_types": sorted({r["before"].get("ami_type") for r in groups.values()
                                   if r["before"].get("ami_type")}),
@@ -312,7 +362,7 @@ def fargate_present(found, chain):
 
 def cluster_name_from(found, eks_address):
     for address, resource in sorted(found.items()):
-        if resource["type"] == "aws_eks_cluster" and address.startswith(eks_address + "."):
+        if resource["type"] == "aws_eks_cluster" and under(address, eks_address):
             return resource["before"].get("name") or (resource["after"] or {}).get("name")
     return None
 
@@ -495,9 +545,10 @@ def analyze_terraform(args, doc, plan, tf_dir):
     found = resources(plan)
     doc["mng"] = mng_facts(plan, found, address, unknowns)
     doc["karpenter"] = karpenter_facts(plan, found, unknowns)
-    for facts, key in ((doc["mng"], "ami_variable"), (doc["karpenter"], "alias_variable")):
+    for facts, key, label in ((doc["mng"], "ami_variable", "mng"), (doc["karpenter"], "alias_variable", "karpenter")):
         if facts[key]:
-            facts[key + "_set_in"] = set_in(tf_dir, facts[key], args.tf_var_file)
+            facts[key + "_set_in"] = source_of(plan, tf_dir, facts[key], args.tf_var_file,
+                                               "{}.{}_set_in".format(label, key), unknowns)
     doc["fargate"] = {"present": fargate_present(found, chain)}
     doc["node_pools"] = [pool for pool, key in (("MNG", "mng"), ("Karpenter", "karpenter"),
                                                 ("Fargate", "fargate")) if doc[key]["present"]]
@@ -567,9 +618,12 @@ def finish(args, doc):
     doc["status"] = doc["status"] or ("ask_user" if doc["unknowns"] else "complete")
     fields = sorted({u["field"] for u in doc["unknowns"]})
     result = {"complete": "PASS", "ask_user": "WARN"}.get(doc["status"], "FAIL")
-    Path(args.output).write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    content = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
+    Path(args.output).write_text(content, encoding="utf-8")
     audit_append(args.audit_log, "DISCOVERY", result, detail_fields(
-        status=doc["status"], output=str(Path(args.output).resolve()), tf_dir=doc["tf_dir"] or "unknown",
+        status=doc["status"], output=str(Path(args.output).resolve()),
+        sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        cluster_name=doc["cluster_name"] or "unknown", tf_dir=doc["tf_dir"] or "unknown",
         module=(doc["module"] or {}).get("address", "unknown"), pools=",".join(doc["node_pools"]) or "none",
         unknowns=",".join(fields) or "none"), severity="-" if result != "FAIL" else "CRITICAL")
     print("DISCOVERY {}: {}".format(result, args.output))
