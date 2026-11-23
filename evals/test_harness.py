@@ -320,3 +320,10 @@ def test_wait_turn_keeps_working_agent(tmp_path):
     process, output = _turn_process(tmp_path, script)
     assert wait_turn(process, output, time.monotonic() + 30, idle=1) == 0
     assert not (tmp_path / 'turn-cuts.jsonl').exists()
+
+
+def test_shim_select_subexpression_multiselect():
+    from evals.shim import render
+    data = {'cluster': {'status': 'ACTIVE', 'version': '1.34'}}
+    args = ['--query', 'cluster.[status,version]', '--output', 'text']
+    assert render(data, args) == 'ACTIVE\t1.34'

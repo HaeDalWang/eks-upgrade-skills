@@ -42,6 +42,9 @@ def select(data, query):
         obj = data[prefix]
         return {k.strip(): obj[v.strip()] for k, v in
                 (pair.split(':') for pair in rest.rstrip('}').split(','))}
+    head, bracket, tail = query.partition('.[')
+    if bracket and tail.endswith(']'):
+        return select(select(data, head), '[' + tail)
     if query.startswith('[') and query.endswith(']'):
         return [select(data, v.strip()) for v in query[1:-1].split(',')]
     if query.startswith('{') and query.endswith('}'):
