@@ -103,7 +103,7 @@ def prepare(run, scenario, claude):
     generalize_project(run / 'project', scenario)
     if scenario.get('recipe'):
         (run / 'project/recipe.md').write_text(scenario['recipe'])
-    (run / 'scenario.json').write_text(json.dumps({**scenario, 'safety_checks_version': 2}, ensure_ascii=False, indent=2))
+    (run / 'scenario.json').write_text(json.dumps({**scenario, 'safety_checks_version': 3}, ensure_ascii=False, indent=2))
     state = {**scenario['initial_state'], 'initial_version': scenario['current_version'],
              'topology': scenario['topology']}
     (run / 'state.json').write_text(json.dumps(state))
@@ -337,6 +337,8 @@ def run_live(run, scenario, model='claude-opus-5-5'):
         if audit.exists():
             shutil.copyfile(audit, run / 'audit.log')
         turns = len(list((run / 'turns').glob('*.jsonl')))
+        for plan_doc in (run / 'project').glob('upgrade-plan*.json'):
+            shutil.copyfile(plan_doc, run / plan_doc.name)
         accounting(run, started, turns, stop)
         grade(run)
     return run

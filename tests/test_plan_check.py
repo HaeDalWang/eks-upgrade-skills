@@ -7,6 +7,7 @@ import pytest
 
 import plan_check
 from lib import parse_audit_line
+from test_upgrade_plan import make_plan
 
 
 def resource(kind, before, after, actions=None, unknown=None):
@@ -94,7 +95,7 @@ def test_malformed_show_json_fails_closed(data):
         plan_check.classify_plan(data, "full", "1.35", {})
 
 
-def invoke(tmp_path, monkeypatch, data, step="cp", extra=None):
+def invoke(tmp_path, monkeypatch, data, step="cp", extra=None, expected=None):
     saved = tmp_path / "a plan.tfplan"
     saved.write_bytes(b"saved terraform plan")
     audit = tmp_path / "audit.log"
@@ -103,7 +104,8 @@ def invoke(tmp_path, monkeypatch, data, step="cp", extra=None):
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, json.dumps(data), "")
     monkeypatch.setattr(plan_check, "run_cmd", show)
-    argv = ["--planfile", str(saved), "--step", step, "--target-version", "1.35",
+    doc, audit = make_plan(tmp_path, order=list(dict.fromkeys([step, "cp", "full"])), expected={step: expected or {}})
+    argv = ["--planfile", str(saved), "--plan-doc", str(doc), "--target-version", "1.35",
             "--tf-dir", str(tmp_path), "--audit-log", str(audit)] + (extra or [])
     code = plan_check.main(argv)
     return code, saved, audit, commands
@@ -142,7 +144,8 @@ def test_plan_mutated_during_show_cannot_pass(tmp_path, monkeypatch):
         saved.write_bytes(b"replaced")
         return subprocess.CompletedProcess(command, 0, json.dumps(plan(cluster())), "")
     monkeypatch.setattr(plan_check, "run_cmd", show)
-    assert plan_check.main(["--planfile", str(saved), "--step", "cp", "--target-version", "1.35",
+    doc, audit = make_plan(tmp_path)
+    assert plan_check.main(["--planfile", str(saved), "--plan-doc", str(doc), "--target-version", "1.35",
         "--tf-dir", str(tmp_path), "--audit-log", str(tmp_path / "audit.log")]) == 1
 
 
@@ -181,18 +184,20 @@ def test_show_failure_records_fail_and_stop(tmp_path, monkeypatch, capsys):
     saved.write_bytes(b"saved")
     monkeypatch.setattr(plan_check, "run_cmd", lambda command:
         subprocess.CompletedProcess(command, 1, "", "could not decode plan"))
-    code = plan_check.main(["--planfile", str(saved), "--step", "cp", "--target-version", "1.35",
+    doc, audit = make_plan(tmp_path)
+    code = plan_check.main(["--planfile", str(saved), "--plan-doc", str(doc), "--target-version", "1.35",
         "--tf-dir", str(tmp_path), "--audit-log", str(audit)])
-    assert code == 1 and parse_audit_line(audit.read_text())["result"] == "FAIL"
+    assert code == 1 and parse_audit_line(audit.read_text().splitlines()[-1])["result"] == "FAIL"
     assert capsys.readouterr().out.splitlines()[-1].startswith("NEXT: STOP ")
 
 
 def test_missing_plan_file_records_failure_without_running_terraform(tmp_path, monkeypatch):
     monkeypatch.setattr(plan_check, "run_cmd", lambda command: pytest.fail("must not run"))
     audit = tmp_path / "audit.log"
-    assert plan_check.main(["--planfile", str(tmp_path / "missing"), "--step", "cp",
+    doc, audit = make_plan(tmp_path)
+    assert plan_check.main(["--planfile", str(tmp_path / "missing"), "--plan-doc", str(doc),
         "--target-version", "1.35", "--tf-dir", str(tmp_path), "--audit-log", str(audit)]) == 1
-    assert parse_audit_line(audit.read_text())["result"] == "FAIL"
+    assert parse_audit_line(audit.read_text().splitlines()[-1])["result"] == "FAIL"
 
 
 @pytest.mark.parametrize("manifest_field,body", [("yaml_body", "kind: EC2NodeClass\nspec: {}\n"),
@@ -246,17 +251,18 @@ def test_repeated_resolved_ami_expectations_match_multiple_resources(tmp_path, m
     classes = [resource("kubernetes_manifest", {}, {"manifest": {
         "kind": "EC2NodeClass", "spec": {"amiSelectorTerms": [{"alias": value}]}}})
         for value in ("x", "y")]
-    extra = [arg for value in ("release_version=a", "release_version=b", "alias=x", "alias=y")
-             for arg in ("--expect-ami-var", value)]
-    assert invoke(tmp_path, monkeypatch, plan(*groups, *classes), "full", extra)[0] == 0
+    expected = {"release_version": ["a", "b"], "alias": ["x", "y"]}
+    assert invoke(tmp_path, monkeypatch, plan(*groups, *classes), "full", expected=expected)[0] == 0
     groups[0]["change"]["after"]["release_version"] = "x"
-    assert invoke(tmp_path, monkeypatch, plan(*groups, *classes), "full", extra)[0] == 1
+    assert invoke(tmp_path, monkeypatch, plan(*groups, *classes), "full", expected=expected)[0] == 1
 
 
-def test_conflicting_named_ami_expectations_are_usage_error(tmp_path, monkeypatch, capsys):
-    code, _, _, commands = invoke(tmp_path, monkeypatch, plan(), extra=[
-        "--expect-ami-var", "ami_var=a", "--expect-ami-var", "ami_var=b"])
-    assert code == 1 and not commands
+def test_conflicting_named_ami_expectations_are_usage_error(tmp_path, capsys):
+    import upgrade_plan
+    code = upgrade_plan.main(["create", "--cluster-name", "demo", "--current-version", "1.34",
+        "--target-version", "1.35", "--tf-dir", str(tmp_path), "--output-language", "ko",
+        "--plan-doc", str(tmp_path / "upgrade-plan.json"), "--expect", "cp:ami_var=a", "--expect", "cp:ami_var=b"])
+    assert code == 1
     assert capsys.readouterr().out.splitlines()[-1].startswith("NEXT: STOP ")
 
 

@@ -80,6 +80,12 @@ Every gate exit 1/2 ends with `NEXT: <ACTION> <detail>`. Follow that final line:
 
 A PLAN-CHECK WARN is not an apply authorization. After ASK_USER, revise the plan/scope to satisfy the allow-list and obtain a fresh PLAN-CHECK PASS; `apply_guard.py` requires PASS for the unchanged file. Never use `-auto-approve`.
 
+Set `PLAN_DOC` to the absolute approved `upgrade-plan.json` path. Read the current step with
+`upgrade_plan.py next --plan-doc "${PLAN_DOC}" --audit-log audit.log` before planning;
+use its targets/expectations and execute the approved order (a custom order overrides the phase ordering below).
+A separate `addon` step, when included, uses the same saved-plan/check/guard/apply/done sequence
+with its own targets and `--plan-doc`. Step ids below are the default ids; use the current id for custom plans.
+
 Use an absolute `TF_DIR`; keep script invocations and `audit.log` in the skill working directory. Terraform subshells below preserve that working directory.
 
 ---
@@ -215,7 +221,7 @@ python3 scripts/audit_event.py \
 
 ```bash
 (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan -target="${EKS_MODULE}" -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/cp.tfplan") &&
-python3 scripts/plan_check.py --planfile "${TF_DIR}/cp.tfplan" --step cp \
+python3 scripts/plan_check.py --planfile "${TF_DIR}/cp.tfplan" --plan-doc "${PLAN_DOC}" \
   --target-version "${TARGET_VERSION}" --tf-dir "${TF_DIR}" \
   --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log
 ```
@@ -254,7 +260,7 @@ It polls kube-system Warning events every 30s and appends `DRAIN-P2` entries to 
 Run in background so polling can proceed in parallel:
 
 ```bash
-python3 scripts/apply_guard.py --planfile "${TF_DIR}/cp.tfplan" --step cp \
+python3 scripts/apply_guard.py --planfile "${TF_DIR}/cp.tfplan" --plan-doc "${PLAN_DOC}" \
   --cluster-name "${CLUSTER_NAME}" --target-version "${TARGET_VERSION}" \
   --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
 # Apply only if both PLAN-CHECK and APPLY-GUARD returned exit 0.
@@ -272,10 +278,10 @@ This typically takes 8–40 minutes for the Control Plane. The MNG rolling updat
 3. Once `ACTIVE` at the target version, run apply **once more** to sync terraform state (add-ons, `time_sleep`):
    ```bash
    (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan -target="${EKS_MODULE}" -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/cp-resync.tfplan") &&
-   python3 scripts/plan_check.py --planfile "${TF_DIR}/cp-resync.tfplan" --step cp \
+   python3 scripts/plan_check.py --planfile "${TF_DIR}/cp-resync.tfplan" --plan-doc "${PLAN_DOC}" \
      --target-version "${TARGET_VERSION}" --tf-dir "${TF_DIR}" \
      --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
-   python3 scripts/apply_guard.py --planfile "${TF_DIR}/cp-resync.tfplan" --step cp \
+   python3 scripts/apply_guard.py --planfile "${TF_DIR}/cp-resync.tfplan" --plan-doc "${PLAN_DOC}" \
      --cluster-name "${CLUSTER_NAME}" --target-version "${TARGET_VERSION}" \
      --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
    (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply "${TF_DIR}/cp-resync.tfplan")
@@ -304,17 +310,18 @@ ${AUTH_PREFIX} aws eks describe-cluster --name "${CLUSTER_NAME}" \
 
 2. If ALL nodegroups are `ACTIVE` + `TARGET_VERSION`:
    - Stop the background terraform apply shell (KillShell)
-   - Create and validate a fresh full saved plan before cleaning up deposed resources. Continue each command only after the preceding command exits 0; an unexpected delete/replace must follow `NEXT: ASK_USER`:
+   - Create and validate a fresh CP-targeted saved plan; timeout cleanup remains inside the current cp step. Continue each command only after the preceding command exits 0; an unexpected delete/replace must follow `NEXT: ASK_USER`:
      ```bash
-     (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/cleanup.tfplan") &&
-     python3 scripts/plan_check.py --planfile "${TF_DIR}/cleanup.tfplan" --step full \
+     (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan -target="${EKS_MODULE}" -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/cleanup.tfplan") &&
+     python3 scripts/plan_check.py --planfile "${TF_DIR}/cleanup.tfplan" --plan-doc "${PLAN_DOC}" \
        --target-version "${TARGET_VERSION}" --tf-dir "${TF_DIR}" \
        --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
-     python3 scripts/apply_guard.py --planfile "${TF_DIR}/cleanup.tfplan" --step full \
+     python3 scripts/apply_guard.py --planfile "${TF_DIR}/cleanup.tfplan" --plan-doc "${PLAN_DOC}" \
        --cluster-name "${CLUSTER_NAME}" --target-version "${TARGET_VERSION}" \
        --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
      (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply "${TF_DIR}/cleanup.tfplan")
      ```
+   - A deposed delete outside the cp allow-list returns `NEXT: ASK_USER`; defer it to the approved full step. Never switch step type for cleanup.
    - Proceed to Phase 2 gate
 
 3. If any nodegroup is still `UPDATING`: continue waiting (re-check every 10 minutes)
@@ -343,7 +350,14 @@ python3 scripts/phase_gate.py phase2 \
   --audit-log audit.log
 ```
 
-Interpret exit code per convention table. On PASS, proceed to Phase 3.
+Interpret exit code per convention table. After CP apply/resync/timeout handling and this gate pass,
+finish the cp step (never finish it before resync/cleanup):
+
+```bash
+python3 scripts/upgrade_plan.py done --plan-doc "${PLAN_DOC}" --audit-log audit.log --step-id cp
+```
+
+On exit 0, proceed to Phase 3.
 
 ---
 
@@ -488,7 +502,12 @@ ${AUTH_PREFIX} aws ssm get-parameters-by-path \
   --output text
 ```
 
-Only query the path that matches the current amiType. Update each `eks_node_ami_alias_*` variable that exists in `terraform.tfvars` to the queried value. Save its actual variable name as `AMI_VAR` and its approved value as `NEW_AMI`; repeat `--expect-ami-var name=value` for every AMI variable/resource value in the nodes plan. If the variable contains an alias rather than the resolved node-group value, also pass `--expect-ami-var "release_version=${RESOLVED_RELEASE_VERSION}"` with the approved resolved release. The reserved `release_version=value` and `alias=value` options may repeat with different approved values for multiple node groups/NodeClasses; each resource must match its own kind's approved set. Named Terraform variables accept one value each (conflicting duplicates are a usage error). The resulting release_version must be explicit and match the approved value; do not accept null/unknown AMIs.
+Only query the path that matches the current amiType. Use the AMI variable names and expected
+values already recorded in the approved plan's `nodes.expect`; do not choose new expectations
+at check time. Update only the MNG variables for this step. Resolved `release_version` must be
+explicit and match its approved value; null/unknown AMIs fail. Karpenter AMI changes belong to
+its own targeted `karpenter` step below. If discovered values differ, revise the plan and obtain
+fresh approval before execution.
 
 Record to audit.log:
 
@@ -505,8 +524,8 @@ python3 scripts/audit_event.py \
 ```bash
 (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan \
   -target="${EKS_MODULE}.module.eks_managed_node_group" -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/nodes.tfplan") &&
-python3 scripts/plan_check.py --planfile "${TF_DIR}/nodes.tfplan" --step nodes \
-  --target-version "${TARGET_VERSION}" --expect-ami-var "${AMI_VAR}=${NEW_AMI}" \
+python3 scripts/plan_check.py --planfile "${TF_DIR}/nodes.tfplan" --plan-doc "${PLAN_DOC}" \
+  --target-version "${TARGET_VERSION}" \
   --tf-dir "${TF_DIR}" --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log
 ```
 
@@ -517,7 +536,7 @@ Review the plan:
 ### 4-4. Targeted Apply for MNG
 
 ```bash
-python3 scripts/apply_guard.py --planfile "${TF_DIR}/nodes.tfplan" --step nodes \
+python3 scripts/apply_guard.py --planfile "${TF_DIR}/nodes.tfplan" --plan-doc "${PLAN_DOC}" \
   --cluster-name "${CLUSTER_NAME}" --target-version "${TARGET_VERSION}" \
   --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
 (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply "${TF_DIR}/nodes.tfplan")
@@ -550,7 +569,14 @@ Interpret exit code per convention table.
 - TRANSIENT pods: Wait 60 seconds, then re-run the gate script.
 - The script classifies and reports only — it does NOT delete pods.
 
-On PASS, proceed to Phase 5.
+Run this gate even when the plan has no `nodes` step (no MNG: skip 4-1 → 4-4, keep 4-6).
+On PASS, finish the nodes step only if the plan has one:
+
+```bash
+python3 scripts/upgrade_plan.py done --plan-doc "${PLAN_DOC}" --audit-log audit.log --step-id nodes
+```
+
+Proceed to Phase 5.
 
 ---
 
@@ -591,9 +617,25 @@ python3 scripts/service_watch.py --phase P5 --audit-log audit.log \
 
 It records `SVC-P5` entries to audit.log. **Terminate after the Phase 5 gate passes**: KillShell, or use `--stop-file`.
 
-### 5-1. Monitor Karpenter Node Replacement
+### 5-1. Targeted Karpenter Plan and Apply
 
-If Karpenter is present, AMI alias updates in Phase 4 trigger drift detection and automatic node replacement.
+If Karpenter is present, read the current `karpenter` step. With the monitors running,
+update only its approved AMI variables in tfvars. Use the EC2NodeClass address from the
+step's targets as `NODECLASS_ADDRESS`; never include this change in the nodes plan.
+
+```bash
+(cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan -target="${NODECLASS_ADDRESS}" \
+  -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/karpenter.tfplan") &&
+python3 scripts/plan_check.py --planfile "${TF_DIR}/karpenter.tfplan" --plan-doc "${PLAN_DOC}" \
+  --target-version "${TARGET_VERSION}" --tf-dir "${TF_DIR}" \
+  --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
+python3 scripts/apply_guard.py --planfile "${TF_DIR}/karpenter.tfplan" --plan-doc "${PLAN_DOC}" \
+  --cluster-name "${CLUSTER_NAME}" --target-version "${TARGET_VERSION}" \
+  --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
+(cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply "${TF_DIR}/karpenter.tfplan")
+```
+
+Apply triggers Karpenter drift detection and automatic node replacement.
 
 Monitor replacement progress:
 
@@ -611,7 +653,14 @@ python3 scripts/phase_gate.py phase5 \
   --audit-log audit.log
 ```
 
-Interpret exit code per convention table. If Karpenter is not present, the script returns PASS (skip). On PASS, proceed to Phase 6.
+Interpret exit code per convention table. Run this gate even when the plan has no `karpenter` step: without Karpenter the
+script records PASS (skip). On PASS, finish the karpenter step only if the plan has one:
+
+```bash
+python3 scripts/upgrade_plan.py done --plan-doc "${PLAN_DOC}" --audit-log audit.log --step-id karpenter
+```
+
+Proceed to Phase 6.
 
 ---
 
@@ -621,11 +670,12 @@ After all component upgrades, run a full plan to catch remaining drift.
 
 ### 6-1. Full Plan and Apply
 
-When Phase 4/5 supplied `--expect-ami-var name=value` options, pass all of those same options (including every approved `release_version` and `alias`) to the full-plan check below. If full sync changes a node AMI or leaves it unknown without an expectation for that kind, PLAN-CHECK exits 2 with `NEXT: ASK_USER`; obtain approved expectations and check again.
+The current step must be `full`. Its AMI expectations come from `full.expect` in the approved
+JSON. A changed/unknown AMI without an expectation returns `NEXT: ASK_USER`; handle it via `skip`/ASK_USER (DEVIATION) because re-approval is refused mid-run, and never pass new expectations to the check.
 
 ```bash
 (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/full.tfplan") &&
-python3 scripts/plan_check.py --planfile "${TF_DIR}/full.tfplan" --step full \
+python3 scripts/plan_check.py --planfile "${TF_DIR}/full.tfplan" --plan-doc "${PLAN_DOC}" \
   --target-version "${TARGET_VERSION}" --tf-dir "${TF_DIR}" \
   --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log
 ```
@@ -635,7 +685,7 @@ python3 scripts/plan_check.py --planfile "${TF_DIR}/full.tfplan" --step full \
 Only after PLAN-CHECK exits 0, apply the exact saved plan. If it changes nodes, start or keep a drain monitor running before the guard (`DRAIN-P4`/`DRAIN-P5` START with a live PID and no later STOP); restart the appropriate monitor if Phase 4/5 already stopped it:
 
 ```bash
-python3 scripts/apply_guard.py --planfile "${TF_DIR}/full.tfplan" --step full \
+python3 scripts/apply_guard.py --planfile "${TF_DIR}/full.tfplan" --plan-doc "${PLAN_DOC}" \
   --cluster-name "${CLUSTER_NAME}" --target-version "${TARGET_VERSION}" \
   --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
 (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply "${TF_DIR}/full.tfplan")
@@ -653,7 +703,14 @@ python3 scripts/phase_gate.py phase6 \
 
 (Omit `--auth-prefix` / `--tf-var-file` if not in the recipe.) The gate runs `terraform plan`/`show` **inside** the script, so it cannot inherit a shell prefix — you MUST pass `--auth-prefix`/`--tf-var-file` here, or the plan fails (exit 1) and the gate wrongly FAILs. This is a real bug that caused false FAILs before these flags existed.
 
-Interpret exit code per convention table. The script uses `terraform show -json` for plan analysis (not text parsing). On PASS, proceed to Phase 7.
+Interpret exit code per convention table. The script uses `terraform show -json` for plan analysis (not text parsing).
+After the full apply and this gate pass, finish the step:
+
+```bash
+python3 scripts/upgrade_plan.py done --plan-doc "${PLAN_DOC}" --audit-log audit.log --step-id full
+```
+
+Proceed to Phase 7.
 
 ---
 

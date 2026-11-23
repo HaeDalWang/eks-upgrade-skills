@@ -12,6 +12,7 @@ from lib import parse_audit_line
 from .safety_checks import SAFETY_ASSERTIONS, safety_checks
 from .scenario_checks import scenario_checks
 from .batch2_checks import batch2_checks
+from .plan_checks import PLAN_ASSERTIONS, plan_checks
 
 
 def read_jsonl(path):
@@ -115,8 +116,10 @@ def grade(run):
     scenario = json.loads((path if path.exists() else Path(__file__).parent /
                            'scenarios/normal-karpenter-fargate.json').read_text())
     assertions = list(scenario['assertions'])
-    if scenario.get('safety_checks_version') == 2:
+    if scenario.get('safety_checks_version', 0) >= 2:
         assertions.extend(SAFETY_ASSERTIONS)
+    if scenario.get('safety_checks_version', 0) >= 3:
+        assertions.extend(PLAN_ASSERTIONS)
     result = {}
     def check(name, passed, evidence):
         if name not in assertions:
@@ -156,8 +159,10 @@ def grade(run):
     summary_path = run / 'summary.json'
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
     batch2_checks(check, scenario, calls, audit, applies, before, users, final, summary)
-    if scenario.get('safety_checks_version') == 2:
+    if scenario.get('safety_checks_version', 0) >= 2:
         safety_checks(check, calls, audit, users)
+    if scenario.get('safety_checks_version', 0) >= 3:
+        plan_checks(check, run, audit)
     missing = set(assertions) - result.keys()
     if missing:
         raise ValueError(f'unknown assertions: {sorted(missing)}')

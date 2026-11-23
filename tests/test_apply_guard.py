@@ -10,18 +10,22 @@ import pytest
 import apply_guard
 from lib import audit_append, parse_audit_line
 from plan_check import detail_fields
+from test_upgrade_plan import make_plan
+import upgrade_plan as up
 
 
 def setup(tmp_path, step="cp", node_changes=False):
     saved = tmp_path / "saved plan.tfplan"
     saved.write_bytes(b"saved terraform plan")
     audit = tmp_path / "audit.log"
+    doc, audit = make_plan(tmp_path, order=list(dict.fromkeys([step, "cp", "full"])))
+    _, _, binding, _, _ = up.current(doc, audit)
     digest = hashlib.sha256(saved.read_bytes()).hexdigest()
-    fields = dict(planfile=str(saved), sha256=digest, step=step,
+    fields = dict(planfile=str(saved), sha256=digest, step=step, step_id=step, **binding,
                   target_version="1.35", node_changes=str(node_changes).lower(),
                   cp_update=str(step == "cp").lower())
     audit_append(str(audit), "PLAN-CHECK", "PASS", detail_fields(**fields))
-    args = Namespace(step=step, target_version="1.35", cluster_name="demo", auth_prefix="")
+    args = Namespace(step=step, step_id=step, **binding, target_version="1.35", cluster_name="demo", auth_prefix="")
     return saved, audit, fields, args
 
 
@@ -122,7 +126,7 @@ def test_guard_cli_records_pass_and_honors_auth_prefix(tmp_path, monkeypatch):
         commands.append(command)
         return process_or_cluster(command)
     monkeypatch.setattr(apply_guard, "run_cmd", aws)
-    code = apply_guard.main(["--planfile", str(saved), "--step", "nodes", "--cluster-name", "demo",
+    code = apply_guard.main(["--planfile", str(saved), "--plan-doc", str(tmp_path / "upgrade-plan.json"), "--cluster-name", "demo",
         "--target-version", "1.35", "--audit-log", str(audit),
         "--auth-prefix", "aws-vault exec account --"])
     assert code == 0
@@ -135,7 +139,7 @@ def test_guard_cli_records_pass_and_honors_auth_prefix(tmp_path, monkeypatch):
 def test_guard_cli_detects_changed_plan_and_emits_stop(tmp_path, capsys):
     saved, audit, fields, args = setup(tmp_path)
     saved.write_bytes(b"different plan")
-    assert apply_guard.main(["--planfile", str(saved), "--step", "cp", "--cluster-name", "demo",
+    assert apply_guard.main(["--planfile", str(saved), "--plan-doc", str(tmp_path / "upgrade-plan.json"), "--cluster-name", "demo",
         "--target-version", "1.35", "--audit-log", str(audit)]) == 1
     assert capsys.readouterr().out.splitlines()[-1].startswith("NEXT: STOP ")
     assert parse_audit_line(audit.read_text().splitlines()[-1])["result"] == "FAIL"
@@ -145,7 +149,7 @@ def test_unreadable_audit_log_fails_closed(tmp_path, capsys):
     saved = tmp_path / "saved.tfplan"
     saved.write_bytes(b"saved")
     audit = tmp_path / "missing-audit.log"
-    assert apply_guard.main(["--planfile", str(saved), "--step", "cp", "--cluster-name", "demo",
+    assert apply_guard.main(["--planfile", str(saved), "--plan-doc", str(tmp_path / "upgrade-plan.json"), "--cluster-name", "demo",
         "--target-version", "1.35", "--audit-log", str(audit)]) == 1
     assert capsys.readouterr().out.splitlines()[-1].startswith("NEXT: STOP ")
 

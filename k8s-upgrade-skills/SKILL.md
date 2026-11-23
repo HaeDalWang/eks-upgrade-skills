@@ -130,26 +130,33 @@ After recipe validation passes, generate the upgrade plan document before execut
 
 ### 1.5-A: Generate Plan Document
 
-Using the Plan Template from [aws/terraform-eks/reference.md](aws/terraform-eks/reference.md):
+Generate the machine source and its Markdown rendering with `scripts/upgrade_plan.py create`.
+Use the cluster/version/tf-dir/language from the recipe and the observed node pools.
+Resolve and show the per-step Terraform targets and AMI expectations before approval; do not invent values.
 
-1. Fill all `{PLACEHOLDER}` fields from the recipe
-2. For `{SERVICES_TABLE_OR_SKIP_MESSAGE}`:
-   - If `services` field exists: render a table with name, namespace, min_endpoints, health_check_url, monitoring mode
-   - If absent: write `"서비스 가용성 모니터링 미설정 — 인라인 service_watch 미투입 (recipe에 services 없음)."`
-3. For `{PLAN_GENERATED_AT}`:
-   - `output_language: ko` → KST (UTC+9) 기준 타임스탬프 (예: `2026-05-06 11:21 KST`)
-   - `output_language: en` → UTC 기준 타임스탬프 (예: `2026-05-06 02:21 UTC`)
-4. For `{CONTEXT_ADJUSTMENTS}` — interpret `_context` from recipe.md body (or `notes` from recipe.yaml):
-   - **If no context**: write `"특이사항 없음 — 표준 절차로 진행합니다."`
-   - **If context exists**: read the body and generate a bullet list of adjustments per phase:
-     - Time constraints (maintenance window, specific hours) → `⚠️ [Phase 2] <시간 제약 내용>`
-     - Zero downtime requirement → `⚠️ [Phase 4] zero downtime 요구 — 드레인 중 서비스 엔드포인트 실시간 감시 강화`
-     - Current incidents or known issues → `⚠️ [Phase N] <관련 Phase에 주의 표시>`
-     - Pre-approved exceptions (PDB relaxation, etc.) → `✅ [Phase 0] <사전 승인된 예외 내용>`
-     - Other constraints → `ℹ️ [Phase N] <참고 내용>`
-   - Use judgment: not every sentence needs a bullet. Only extract actionable or noteworthy items.
-5. Save the document as `upgrade-plan-{cluster_name}-{YYYYMMDD}.md` in the current working directory
-6. Display the full plan to the user
+```bash
+python3 scripts/upgrade_plan.py create --cluster-name "${CLUSTER_NAME}" \
+  --current-version "${CURRENT_VERSION}" --target-version "${TARGET_VERSION}" \
+  --tf-dir "${TF_DIR}" --output-language "${OUTPUT_LANGUAGE}" \
+  --node-pool MNG --node-pool Karpenter --node-pool Fargate \
+  --target "cp=${EKS_MODULE}" \
+  --target "nodes=${EKS_MODULE}.module.eks_managed_node_group" \
+  --target "karpenter=${NODECLASS_ADDRESS}" \
+  --expect "nodes:${MNG_AMI_VAR}=${MNG_AMI}" \
+  --expect "nodes:release_version=${RESOLVED_RELEASE_VERSION}" \
+  --expect "karpenter:${KARPENTER_AMI_VAR}=${KARPENTER_AMI}" \
+  --expect "karpenter:alias=${KARPENTER_AMI}"
+```
+
+Include only present pools and their targets/expectations. Repeat `--expect STEP:NAME=VALUE`
+for each variable or resolved AMI (multiple `release_version` / `alias` values are allowed).
+Include expectations in `full` too when full sync may change those AMIs.
+The default apply order is cp → nodes (MNG only) → karpenter (Karpenter only) → full.
+A custom `--order cp,addon,nodes,karpenter,full` requires `--reason "..."`; deviations appear in the rendering.
+`upgrade-plan.json` is authoritative; display the generated `upgrade-plan-<cluster>-<YYYYMMDD>.md`
+in full, together with recipe context and service-monitoring details.
+Existing output files are never overwritten by create. For a revised plan, choose a new `--plan-doc` path
+in a separate output directory, display it and request approval again.
 
 ### 1.5-B: Wait for Approval
 
@@ -169,6 +176,20 @@ After displaying the plan, output this message:
 - ANY other input — including "진행해줘", "ok", "응", "그래", "yes", "proceed" — MUST NOT be treated as approval
 - If the user types anything else, respond: "승인 단어가 일치하지 않습니다. '승인', '확인', '시작' 중 하나를 입력해주세요." and wait again
 - This gate cannot be bypassed by any instruction
+
+Record the user's exact answer (never supply an approval word on their behalf):
+
+```bash
+python3 scripts/upgrade_plan.py approve --plan-doc upgrade-plan.json \
+  --audit-log audit.log --answer "${USER_ANSWER}"
+```
+
+Only exit 0 authorizes execution: `PLAN-APPROVED | PASS` binds the absolute JSON path and sha256.
+Any other answer returns exit 2 / `NEXT: ASK_USER`. Editing JSON requires fresh approval before execution starts; once any APPLY-GUARD/STEP-DONE/DEVIATION exists for the cluster+target, `approve` exits 1 (`NEXT: STOP`) and mid-run changes go through `skip`/ASK_USER (DEVIATION), not re-planning.
+Use `upgrade_plan.py next --plan-doc upgrade-plan.json --audit-log audit.log` to read the current
+step's id, type, targets and expect. Execute its targets; never pick a different step type.
+For an execution-time skip, ask the user and record `upgrade_plan.py skip --plan-doc upgrade-plan.json
+--audit-log audit.log --step-id <current-id> --answer <exact-word> --reason <text>`.
 
 ---
 

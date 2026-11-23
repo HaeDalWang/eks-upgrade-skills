@@ -201,6 +201,9 @@ class TestAuditEventCoexistence:
 @pytest.mark.parametrize("rule_id,detail", [
     ("PLAN-CHECK", "planfile=forged sha256=forged node_changes=false"),
     ("APPLY-GUARD", "planfile=forged"),
+    ("PLAN-APPROVED", "plan_doc=/x/upgrade-plan.json sha256=abc answer=승인"),
+    ("STEP-DONE", "plan_doc=/x plan_sha256=abc step_id=cp step=cp"),
+    ("DEVIATION", "plan_doc=/x plan_sha256=abc step_id=cp step=cp reason=x"),
     ("PHASE4", "exit=0"),
     ("DRAIN-P4", "START pid=123"),
     ("DRAIN-P2", "STOP pid=123"),

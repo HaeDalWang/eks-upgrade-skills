@@ -4,9 +4,11 @@
 
 ## Plan Template (계획서)
 
-Generate this document after recipe validation, before Phase 0. Save as `upgrade-plan-{CLUSTER_NAME}-{YYYYMMDD}.md`.
-
-Fill every `{PLACEHOLDER}` from recipe.yaml. Do NOT invent data.
+`scripts/upgrade_plan.py create` renders `upgrade-plan-{CLUSTER_NAME}-{YYYYMMDD}.md` from
+`upgrade-plan.json`. The generated table contains ordered ID / Type / Targets / Expect columns,
+followed by all deviations (with reasons) and the language-specific exact approval words.
+The JSON path and sha256, rather than Markdown text, are approved in audit.log.
+The templates below are supplementary human context; they never override the generated step order.
 
 ### Korean Template (output_language: ko)
 

@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 from lib import GateArgumentParser, audit_append, run_cmd
+from upgrade_plan import current, detail_fields, fields, load, records
 
 STEPS = ("cp", "addon", "nodes", "karpenter", "full")
 NODE_TYPES = frozenset({"aws_eks_node_group", "aws_launch_template",
@@ -36,12 +37,6 @@ COMPUTED_FIELDS = {
 }
 ACTIONS = {("no-op",), ("read",), ("create",), ("update",),
            ("delete",), ("delete", "create"), ("create", "delete")}
-
-
-def detail_fields(**fields):
-    """Shell-quoted key=value fields shared with apply_guard's audit reader."""
-    return " ".join("{}={}".format(key, shlex.quote(str(value)))
-                    for key, value in fields.items())
 
 
 def _manifest(change, side="after"):
@@ -219,34 +214,18 @@ def _check_amis(resources, step, expected):
         allowed = _expected_values(expected, kind)
         ami_changed = values != _ami_values(change, "before") or None in values
         if step == "full" and ami_changed and not allowed:
-            return 2, "changed/unknown node AMI requires --expect-ami-var for " + kind
+            return 2, "changed/unknown node AMI requires approved plan expectations for " + kind
         if step == "nodes" or expected:
             if not values or any(not value or value not in allowed for value in values):
-                return 1, "node AMI missing/unknown or differs from --expect-ami-var"
+                return 1, "node AMI missing/unknown or differs from approved plan expectations"
     return 0, ""
-
-
-def _expectations(items):
-    expected = {}
-    for item in items:
-        name, separator, value = item.partition("=")
-        if not separator or not name or not value:
-            raise ValueError("--expect-ami-var requires name=value entries")
-        if name in ("release_version", "alias"):
-            expected.setdefault(name, set()).add(value)
-        elif name in expected and expected[name] != value:
-            raise ValueError("--expect-ami-var requires unique named variable values")
-        else:
-            expected[name] = value
-    return expected
 
 
 def build_parser():
     parser = GateArgumentParser(description=__doc__)
     parser.add_argument("--planfile", required=True)
-    parser.add_argument("--step", required=True, choices=STEPS)
+    parser.add_argument("--plan-doc", required=True)
     parser.add_argument("--target-version", required=True)
-    parser.add_argument("--expect-ami-var", action="append", default=[])
     parser.add_argument("--tf-dir", required=True)
     parser.add_argument("--auth-prefix", default="")
     parser.add_argument("--audit-log", required=True)
@@ -256,13 +235,27 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     planfile = Path(args.planfile).expanduser().resolve()
-    metadata = dict(planfile=str(planfile), sha256="unknown", step=args.step,
+    metadata = dict(planfile=str(planfile), sha256="unknown", step="unknown", step_id="unknown",
                     target_version=args.target_version, node_changes="false")
     code, message = 1, "plan check failed"
     try:
         if not re.fullmatch(r"\d+\.\d+", args.target_version):
             raise ValueError("--target-version must be X.Y")
-        expected = _expectations(args.expect_ami_var)
+        doc, step, binding, rows, _ = current(args.plan_doc, args.audit_log)
+        metadata.update(binding, step=step["type"], step_id=step["id"])
+        if args.target_version != doc["target_version"] or Path(args.tf_dir).expanduser().resolve() != Path(doc["tf_dir"]):
+            raise ValueError("target-version/tf-dir differs from approved plan")
+        expected = step["expect"]
+        # A saved plan cannot be relabelled after a skip or completion either.
+        # Scoped to this approved plan: reused file names in other hops/plans are unrelated.
+        for row in records(args.audit_log):
+            prior = fields(row["detail"])
+            if (row["rule_id"] == "PLAN-CHECK" and prior.get("planfile") == str(planfile)
+                    and prior.get("plan_doc") == binding["plan_doc"]
+                    and prior.get("plan_sha256") == binding["plan_sha256"]
+                    and prior.get("step_id") not in (None, "unknown")
+                    and (prior.get("step_id") != step["id"] or prior.get("step") != step["type"])):
+                raise ValueError("saved planfile already checked for a different step_id")
         metadata["sha256"] = hashlib.sha256(planfile.read_bytes()).hexdigest()
         command = shlex.split(args.auth_prefix) + ["terraform", "-chdir=" + args.tf_dir,
                                                   "show", "-json", str(planfile)]
@@ -270,9 +263,11 @@ def main(argv=None):
         if result.returncode != 0:
             raise ValueError("terraform show failed: " + result.stderr.strip())
         plan = json.loads(result.stdout)
-        code, message, node_changes = classify_plan(plan, args.step, args.target_version, expected)
+        code, message, node_changes = classify_plan(plan, step["type"], doc["target_version"], expected)
         metadata["cp_update"] = str(_cp_update(_validate_changes(plan))).lower()
         metadata["node_changes"] = str(node_changes).lower()
+        if load(args.plan_doc)[2] != binding["plan_sha256"]:
+            raise ValueError("approved JSON changed while being checked")
         if hashlib.sha256(planfile.read_bytes()).hexdigest() != metadata["sha256"]:
             raise ValueError("planfile changed while being checked")
     except (OSError, ValueError, TypeError, AttributeError) as error:
