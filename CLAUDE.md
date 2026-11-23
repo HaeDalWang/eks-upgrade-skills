@@ -88,24 +88,29 @@ python3 helm-k8s-compat/scripts/helm_compat_check.py \
 
 ```
 k8s-upgrade-skills/          ← AI Agent가 읽는 스킬 디렉토리 (install.sh로 전역 설치됨)
-├── SKILL.md                 ← 루트 라우터: recipe 검증 + (environment, platform, iac) 기반 Sub-Skill 분기
+├── SKILL.md                 ← 진입점(≤170줄): 시작 흐름, 절대 규칙, exit code/NEXT, 인증, step 루프, 압축 후 복구
+├── steps/                   ← Phase별 자기완결 절차 (각 파일은 upgrade_plan.py next로 시작)
+│   ├── start.md             ← discover → Phase 0 → 인터뷰 → recipe → plan → 승인
+│   ├── cp.md / addons.md / nodes.md / karpenter.md / full.md  ← Phase 1+2 / 3 / 4 / 5 / 6
+│   ├── final.md             ← Phase 7 + Fargate 갱신 + report.py
+│   └── failure.md           ← FAIL 시 대응 + 실패 보고서
 ├── scripts/
 │   ├── lib.py               ← 공통 헬퍼: GateResult, audit_flush, audit_append, kubectl_json, record, _parse_cpu/_parse_mem
 │   ├── gate_check.py        ← Phase 0: 18개 사전 검증 규칙 (COM/WLS/CAP/INF)
 │   ├── phase_gate.py        ← Phase 2~7: 각 Phase Gate 함수 (phase2~phase7 서브커맨드)
+│   ├── discover.py          ← 읽기 전용 탐색 → discovery.json
+│   ├── upgrade_plan.py      ← 계획 create/approve/next/done/skip (audit.log 기반 진행)
 │   ├── plan_check.py        ← saved Terraform plan JSON 허용 목록·목표 버전·AMI 검증
 │   ├── apply_guard.py       ← apply 직전 plan 해시·drain monitor·CP 상태 검증
 │   ├── drain_watch.py       ← 인라인 드레인 모니터 (백그라운드 폴링: 이벤트/PDB/NodeClaim → DRAIN-P*)
 │   ├── service_watch.py     ← 인라인 서비스 모니터 (EndpointSlice ready + HTTP health → SVC-P*)
 │   ├── audit_event.py       ← 단일 이벤트 audit.log 기록 CLI (lib.audit_append 래퍼)
+│   ├── report.py            ← 승인된 plan 범위의 audit.log로 보고서 표 생성 + REPORT 기록
 │   └── validate_recipe.py   ← recipe.md / recipe.yaml 스키마 검증
 ├── docs/
 │   └── inline-monitors.md   ← 인라인 모니터 설계 근거 + 감지 신호 레퍼런스 (sub-agent 정의 아님)
 ├── schemas/
 │   └── recipe.schema.json   ← recipe.yaml IDE 스키마 (VSCode/Kiro)
-└── aws/terraform-eks/
-    ├── SKILL.md             ← Phase 0~7 실행 절차 (EKS + Terraform 전용)
-    └── reference.md         ← 계획서·보고서 템플릿, 중단 조건 목록
 
 helm-k8s-compat/             ← 독립 스킬: Helm 차트 ↔ K8s 버전 호환성 사전 점검
 ├── SKILL.md                 ← 워크플로우 (helm ls → registry 대조 → exit code)
@@ -122,6 +127,8 @@ tests/
 ├── test_service_watch.py    ← service_watch.py 단위 테스트
 ├── test_audit_event.py      ← audit_event.py 단위 테스트
 ├── test_validate_recipe.py  ← validate_recipe.py 단위 테스트
+├── test_report.py           ← report.py 단위 테스트 (누적 로그·실패 실행)
+├── test_skill_docs.py       ← 스킬 문서 lint: gate/monitor/guard 순서 보존
 ├── test_helm_compat_check.py ← compat_lib.py 순수 함수 테스트
 └── test_helm_compat_e2e.py  ← helm_compat_check.py 통합 테스트 (CLI/exit code)
 
@@ -223,4 +230,4 @@ Python 3.9+ 지원. `dict | None` 타입 힌트 사용 불가 → `Optional[dict
 3. `lib.py`의 상수(`SYSTEM_NS`, `DATA_PLANE_RESOURCES` 등) 재사용 여부 확인
 4. `tests/test_gate_check.py`에 대응 테스트 클래스 추가 (`reset_gate()` fixture 자동 적용됨)
 5. `docs/required-permissions.md`에 필요 권한 추가
-6. README·`aws/terraform-eks/SKILL.md`의 규칙 개수와 목록 갱신 (현재 18개)
+6. README·`steps/start.md`의 규칙 개수와 목록 갱신 (현재 18개)

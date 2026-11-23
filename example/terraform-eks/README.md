@@ -24,7 +24,7 @@ aws eks update-kubeconfig --name <cluster_name> --region ap-northeast-2
 # 3. (선택) 위험 시나리오 배포 — Phase 0 사전 검증 테스트용
 kubectl apply -f yamls/
 
-# 4. recipe.md의 current_version / target_version을 실제 클러스터에 맞게 수정 후
+# 4. recipe.md의 target_version을 실제 클러스터에 맞게 수정 후 (없으면 Agent가 만들어 줌)
 #    AI Agent에게 요청: "EKS 클러스터를 업그레이드해줘"
 ```
 
@@ -53,16 +53,12 @@ kubectl apply -f yamls/
 ## recipe.md (frontmatter)
 
 ```yaml
-environment: aws
-platform: eks
-iac: terraform
 cluster_name: upgrade-skill     # terraform.tfvars의 cluster_name과 일치
-current_version: "1.34"         # 현재 클러스터 버전
-target_version: "1.35"          # 반드시 current_version의 차기 마이너 버전
+target_version: "1.35"          # 반드시 현재 Control Plane의 차기 마이너 버전
 output_language: ko
 ```
 
-`current_version`과 `target_version`을 실제 클러스터에 맞게 수정 후 사용하세요.
+현재 버전은 discover.py가 라이브 클러스터에서 읽습니다. `target_version`만 실제 클러스터에 맞게 수정하세요.
 
 ## 위험 시나리오 (yamls/)
 

@@ -215,7 +215,7 @@ def test_service_grading_final_message_keyword_contract(tmp_path, text):
 def test_batch2_assertions_all_cite_current_skill_sections(name):
     scenario = json.loads((runner.SCENARIO.parent / (name + '.json')).read_text())
     assert set(scenario['assertions']) == set(scenario['assertion_references'])
-    assert all('SKILL.md' in ref for ref in scenario['assertion_references'].values())
+    assert all('SKILL.md' in ref or 'steps/' in ref for ref in scenario['assertion_references'].values())
 
 
 @pytest.mark.parametrize('fault', ['no-gate', 'blocked', 'unapproved-warn', 'approval-before-warn'])

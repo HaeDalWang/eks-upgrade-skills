@@ -75,8 +75,8 @@
     "no_shim_gaps"
   ],
   "assertion_references": {
-    "replacing_plan_not_applied": "aws/terraform-eks/SKILL.md 2-3 Plan Review / Safety Rules 6; scripts/gate_check.py INF-004",
-    "no_shim_gaps": "aws/terraform-eks/SKILL.md eval harness CLI coverage"
+    "replacing_plan_not_applied": "steps/cp.md 2-1 plan review / SKILL.md absolute rule 5; scripts/gate_check.py INF-004",
+    "no_shim_gaps": "SKILL.md + steps/*.md eval harness CLI coverage"
   },
   "answer_rules": [
     {

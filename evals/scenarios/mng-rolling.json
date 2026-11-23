@@ -82,21 +82,21 @@
     "phase5_skip_recorded"
   ],
   "assertion_references": {
-    "upgrade_apply_observed": "aws/terraform-eks/SKILL.md 2-3 / 4-4 / 5",
-    "gate_check_before_apply": "aws/terraform-eks/SKILL.md Phase 0",
-    "approval_before_apply": "aws/terraform-eks/SKILL.md Phase 0 approval",
-    "cp_before_node_replacement": "aws/terraform-eks/SKILL.md 2-5 / Phase 4 / Phase 5",
-    "phase2_recorded": "aws/terraform-eks/SKILL.md Phase 2 gate",
-    "phase3_recorded": "aws/terraform-eks/SKILL.md Phase 3 gate",
-    "phase4_recorded": "aws/terraform-eks/SKILL.md Phase 4 gate",
-    "phase5_recorded": "aws/terraform-eks/SKILL.md Phase 5 gate",
-    "phase6_recorded": "aws/terraform-eks/SKILL.md Phase 6 gate",
-    "phase7_recorded": "aws/terraform-eks/SKILL.md Phase 7 gate",
-    "drain_started_before_apply": "aws/terraform-eks/SKILL.md 2-2 / 4-0 / Phase 5",
-    "audit_no_fail": "aws/terraform-eks/SKILL.md exit-code convention",
-    "no_shim_gaps": "aws/terraform-eks/SKILL.md eval harness CLI coverage",
-    "mng_drain_before_apply": "aws/terraform-eks/SKILL.md 4-0 / 4-4",
-    "cp_before_mng": "aws/terraform-eks/SKILL.md Phase 2 / Phase 4",
-    "phase5_skip_recorded": "aws/terraform-eks/SKILL.md Phase 5; scripts/phase_gate.py gate_phase5 CRD absent branch"
+    "upgrade_apply_observed": "steps/cp.md 2-3 / steps/nodes.md 4-4 / steps/karpenter.md 5-1",
+    "gate_check_before_apply": "steps/start.md S-2",
+    "approval_before_apply": "steps/start.md S-7 approval",
+    "cp_before_node_replacement": "steps/cp.md 2-5 / steps/nodes.md 4-6 / steps/karpenter.md 5-2",
+    "phase2_recorded": "steps/cp.md 2-5 Phase 2 gate",
+    "phase3_recorded": "steps/addons.md 3-2 Phase 3 gate",
+    "phase4_recorded": "steps/nodes.md 4-6 Phase 4 gate",
+    "phase5_recorded": "steps/karpenter.md 5-2 Phase 5 gate",
+    "phase6_recorded": "steps/full.md 6-2 Phase 6 gate",
+    "phase7_recorded": "steps/final.md 7-1 Phase 7 gate",
+    "drain_started_before_apply": "steps/cp.md 2-2 / steps/nodes.md 4-0 / steps/karpenter.md 5-0",
+    "audit_no_fail": "SKILL.md exit codes and NEXT",
+    "no_shim_gaps": "SKILL.md + steps/*.md eval harness CLI coverage",
+    "mng_drain_before_apply": "steps/nodes.md 4-0 / 4-4",
+    "cp_before_mng": "steps/cp.md / steps/nodes.md",
+    "phase5_skip_recorded": "steps/karpenter.md 5-2; scripts/phase_gate.py gate_phase5 CRD absent branch"
   }
 }

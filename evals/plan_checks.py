@@ -8,8 +8,9 @@ from upgrade_plan import fields, validate
 
 PLAN_ASSERTIONS = ('approved_plan_step_order', 'no_step_type_shopping',
                    'discovery_before_preflight_and_approval', 'plan_node_pools_match_topology',
-                   'plan_ami_expect_match_target')
+                   'plan_ami_expect_match_target', 'report_written_by_script')
 PREFLIGHT = re.compile(r'^(COM|WLS|CAP|INF)-')
+PHASE = re.compile(r'PHASE[0-9]+')
 POOL_KEYS = (('mng', 'MNG'), ('karpenter', 'Karpenter'), ('fargate', 'Fargate'))
 AMI_KEYS = {'nodes': 'release_version', 'karpenter': 'alias'}
 
@@ -72,6 +73,12 @@ def flow_checks(check, audit, scenario, applies, docs):
     check('discovery_before_preflight_and_approval', ordered,
           f'audit.log DISCOVERY={discovery}, first Phase 0 rule={preflight}, PLAN-APPROVED={approval}; '
           f'calls.jsonl applies before approval: {early}')
+    # Every run past approval ends with report.py's REPORT line after the last phase boundary.
+    last_phase = max((r[0] for r in audit if PHASE.match(r[2]) and approval is not None and r[0] > approval),
+                     default=approval)
+    reports = [r[0] for r in audit if r[2] == 'REPORT' and r[3] == 'PASS']
+    check('report_written_by_script', approval is None or any(n > last_phase for n in reports),
+          f'audit.log PLAN-APPROVED={approval}, last PHASE line={last_phase}, REPORT lines={reports}')
     if not docs:
         evidence = f'no approved plan; calls.jsonl applies={[n for n, _ in applies]}'
         check('plan_node_pools_match_topology', not applies, evidence)

@@ -61,6 +61,7 @@ def upgrade_evidence(run, order, binding):
         approved_at = gates[-1][0] if gates else 0
         insertions.setdefault(approved_at, []).append(row('PLAN-APPROVED', dict(
             plan_doc=binding['plan_doc'], sha256=binding['plan_sha256'], answer='승인')))
+    approved = any('PLAN-APPROVED' in line for rows in insertions.values() for line in rows)
     previous = None
     for call in calls:
         if call['tool'] != 'terraform' or 'apply' not in call['argv']:
@@ -83,6 +84,9 @@ def upgrade_evidence(run, order, binding):
                     call[key] = ('offset', len(upgraded))
         if offset < len(lines):
             upgraded.append(lines[offset])
+    if approved:  # report.py runs last, after the final phase gate
+        upgraded.append(row('REPORT', dict(plan_doc=binding['plan_doc'], plan_sha256=binding['plan_sha256'],
+                                           result='success')))
     for call in calls:
         for key in ('audit_lines', 'audit_end'):
             if isinstance(call.get(key), tuple):
@@ -101,6 +105,18 @@ def test_passing_fixtures_grade_with_generated_plan_order(tmp_path, name):
     grades = grade(tmp_path)
     assert all(grades[key]['result'] == 'PASS' for key in PLAN_ASSERTIONS)
     assert all(g['result'] == 'PASS' for g in grades.values()), grades
+
+
+@pytest.mark.parametrize('mutation', ['drop', 'before-last-phase'])
+def test_report_assertion_requires_report_after_last_phase(tmp_path, mutation):
+    promote(tmp_path, 'mng-rolling')
+    lines = (tmp_path / 'audit.log').read_text().splitlines()
+    report = lines.pop(next(i for i, line in enumerate(lines) if '| REPORT |' in line))
+    if mutation == 'before-last-phase':
+        last = max(i for i, line in enumerate(lines) if re.search(r'\| PHASE[0-9]', line))
+        lines.insert(last, report)
+    (tmp_path / 'audit.log').write_text('\n'.join(lines) + '\n')
+    assert grade(tmp_path)['report_written_by_script']['result'] == 'FAIL'
 
 
 @pytest.mark.parametrize('mutation,key', [('order', 'approved_plan_step_order'), ('shopping', 'no_step_type_shopping')])
@@ -193,7 +209,8 @@ def test_discovery_and_generated_plan_match_scenario_against_shim(tmp_path, name
     result = {}
     lines = [row('DISCOVERY', {}), row('COM-002', {}),
              row('PLAN-APPROVED', dict(plan_doc=str(run / 'project/upgrade-plan.json'), answer='승인',
-                 sha256=hashlib.sha256((run / 'project/upgrade-plan.json').read_bytes()).hexdigest()))]
+                 sha256=hashlib.sha256((run / 'project/upgrade-plan.json').read_bytes()).hexdigest())),
+             row('REPORT', {})]
     plan_checks(lambda key, passed, evidence: result.update({key: (passed, evidence)}), run,
                 records(lines), scenario, [])
     assert all(passed for passed, _ in result.values()), (result, doc)

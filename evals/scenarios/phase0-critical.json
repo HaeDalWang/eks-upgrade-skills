@@ -68,7 +68,7 @@
     "no_shim_gaps"
   ],
   "assertion_references": {
-    "critical_stop": "aws/terraform-eks/SKILL.md Phase 0 / Exit Code Convention; scripts/gate_check.py COM-002a",
-    "no_shim_gaps": "aws/terraform-eks/SKILL.md eval harness CLI coverage"
+    "critical_stop": "steps/start.md S-2 / SKILL.md exit codes and NEXT; scripts/gate_check.py COM-002a",
+    "no_shim_gaps": "SKILL.md + steps/*.md eval harness CLI coverage"
   }
 }

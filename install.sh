@@ -21,7 +21,7 @@ SKILLS="k8s-upgrade-skills helm-k8s-compat"
 # 스킬별 필수 파일 검증 목록
 get_required() {
   case "$1" in
-    k8s-upgrade-skills) echo "scripts/gate_check.py scripts/phase_gate.py scripts/lib.py scripts/validate_recipe.py" ;;
+    k8s-upgrade-skills) echo "scripts/gate_check.py scripts/phase_gate.py scripts/lib.py scripts/validate_recipe.py scripts/report.py steps/start.md" ;;
     helm-k8s-compat)    echo "scripts/helm_compat_check.py scripts/compat_lib.py registry/_schema.md" ;;
     *) echo "" ;;
   esac

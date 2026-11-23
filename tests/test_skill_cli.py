@@ -11,7 +11,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "k8s-upgrade-skills/aws/terraform-eks/SKILL.md"
+DOCS = [ROOT / "k8s-upgrade-skills/SKILL.md", *sorted((ROOT / "k8s-upgrade-skills/steps").glob("*.md"))]
 SCRIPTS = ROOT / "k8s-upgrade-skills/scripts"
 
 
@@ -20,7 +20,7 @@ class ParsedCommand(Exception):
 
 
 def script_commands():
-    text = SKILL.read_text().replace("\\\n", " ")
+    text = "\n".join(doc.read_text() for doc in DOCS).replace("\\\n", " ")
     return [shlex.split(match.group(1).removesuffix(" &&")) for match in re.finditer(
         r"^\s*python3\s+(scripts/[\w]+\.py[^\n]*)", text, re.MULTILINE
     )]
@@ -50,6 +50,7 @@ def test_skill_command_extraction_includes_every_script(monkeypatch):
     assert {Path(args[0]).name for args in commands} == {
         "gate_check.py", "phase_gate.py", "drain_watch.py", "service_watch.py",
         "audit_event.py", "plan_check.py", "apply_guard.py", "upgrade_plan.py",
+        "discover.py", "report.py",
     }
 
 

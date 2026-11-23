@@ -19,7 +19,12 @@ def detail_fields(**fields):
 
 
 def fields(detail):
-    return dict(token.split("=", 1) for token in shlex.split(detail) if "=" in token)
+    # Machine records are shlex-quoted; free-text details (monitor events: "doesn't") may not parse.
+    try:
+        tokens = shlex.split(detail)
+    except ValueError:
+        return {}
+    return dict(token.split("=", 1) for token in tokens if "=" in token)
 
 
 def records(path):

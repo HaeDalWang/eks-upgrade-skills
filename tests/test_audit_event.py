@@ -205,6 +205,7 @@ class TestAuditEventCoexistence:
     ("STEP-DONE", "plan_doc=/x plan_sha256=abc step_id=cp step=cp"),
     ("DEVIATION", "plan_doc=/x plan_sha256=abc step_id=cp step=cp reason=x"),
     ("DISCOVERY", "status=complete"),
+    ("REPORT", "plan_doc=/x plan_sha256=abc result=success"),
     ("PHASE4", "exit=0"),
     ("DRAIN-P4", "START pid=123"),
     ("DRAIN-P2", "STOP pid=123"),
