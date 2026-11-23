@@ -32,22 +32,22 @@ def reset_counters():
 
 
 class TestAllRulesOrder:
-    """18개 규칙 ALL_RULES 순서 확인."""
+    """20개 규칙 ALL_RULES 순서 확인."""
 
     def test_all_rules_order(self):
-        """main() 소스에 ALL_RULES 18개 항목이 올바른 순서로 정의되어 있는지 확인."""
+        """main() 소스에 ALL_RULES 20개 항목이 올바른 순서로 정의되어 있는지 확인."""
         source = inspect.getsource(gate_check.main)
         expected = [
-            "COM-002", "COM-001", "COM-002a", "COM-003", "COM-004",
+            "COM-002", "COM-001", "COM-002a", "COM-003", "COM-004", "COM-005",
             "WLS-001", "WLS-002", "WLS-003", "WLS-004", "WLS-005", "WLS-006",
             "CAP-001", "CAP-002", "CAP-003",
-            "INF-001", "INF-002", "INF-003", "INF-004",
+            "INF-001", "INF-002", "INF-003", "INF-004", "INF-005",
         ]
         assert "ALL_RULES" in source
         for rule in expected:
             assert f'"{rule}"' in source, f"{rule} not found in ALL_RULES"
-        # 18개 항목 확인
-        assert len(expected) == 18
+        # 20개 항목 확인
+        assert len(expected) == 20
 
 
 class TestTfDirNotProvidedSkipsInfRules:
@@ -111,8 +111,8 @@ class TestCom002CriticalFailSkipsRest:
                     gate_check.main()
         assert exc_info.value.code == 1
         assert gate_check.critical_fail >= 1
-        # 18개 규칙 전부 기록 (1 FAIL + 17 SKIP)
-        assert gate_check.total_rules == 18
+        # 20개 규칙 전부 기록 (1 FAIL + 19 SKIP)
+        assert gate_check.total_rules == 20
 
 
 class TestCom003EmptyAddonsPass:
@@ -1637,14 +1637,14 @@ class TestCom002aDefensive:
             {"metadata": {"name": "node-2"}, "status": {"nodeInfo": {}}},  # kubeletVersion 없음
         ]}
         with unittest.mock.patch("gate_check.kubectl_json", return_value=nodes_json):
-            gate_check.check_com002a("1.34")
+            gate_check.check_com002a("1.34", "1.33")
         # 크래시 없이 PASS (빈 버전은 skip)
         assert gate_check.critical_fail == 0
 
     def test_empty_nodes_records_fail(self):
         """노드 0개 조회 → 컨텍스트/RBAC 비정상으로 간주, CRITICAL FAIL (false PASS 방지)."""
         with unittest.mock.patch("gate_check.kubectl_json", return_value={"items": []}):
-            gate_check.check_com002a("1.34")
+            gate_check.check_com002a("1.34", "1.33")
         assert gate_check.critical_fail >= 1
 
 
@@ -1721,7 +1721,7 @@ class TestKubectlJsonNoneHandling:
 
     def test_check_com002a_kubectl_fail_records_fail(self):
         with unittest.mock.patch("gate_check.kubectl_json", return_value=None):
-            gate_check.check_com002a("1.34")
+            gate_check.check_com002a("1.34", "1.33")
         assert gate_check.critical_fail >= 1
 
 
@@ -2070,3 +2070,98 @@ class TestPhase0ResultKeysClusterAndTarget:
         rows = [r for r in upgrade_plan.records(log) if r["rule_id"] == "PHASE0" and r["result"] != "ENTER"]
         assert [r["result"] for r in rows] == ["FAIL"]
         assert upgrade_plan.fields(rows[0]["detail"]) == {"cluster_name": "test", "target_version": "1.34"}
+
+
+class TestCom002aCurrentControlPlane:
+    @pytest.mark.parametrize("versions, expected", [(["v1.33.0"], "PASS"),
+                                                   (["v1.32.0", "v1.31.0"], "WARN"),
+                                                   (["v1.30.0"], "FAIL")])
+    def test_current_cp_warn_and_target_n3_limit(self, versions, expected):
+        nodes = {"items": [{"metadata": {"name": f"worker-{i}"}, "status": {
+            "nodeInfo": {"kubeletVersion": version}}} for i, version in enumerate(versions)]}
+        with unittest.mock.patch("gate_check.kubectl_json", return_value=nodes):
+            gate_check.check_com002a("1.34", "1.33")
+        assert (gate_check.critical_fail, gate_check.high_warn) == {
+            "PASS": (0, 0), "WARN": (0, 1), "FAIL": (1, 0)}[expected]
+
+    def test_fargate_warn_lists_nodes_separately_with_restart_guidance(self, capsys):
+        nodes = {"items": [
+            {"metadata": {"name": "ec2-old"}, "status": {"nodeInfo": {"kubeletVersion": "v1.32.0"}}},
+            {"metadata": {"name": "fg-old", "labels": {"eks.amazonaws.com/compute-type": "fargate"}},
+             "status": {"nodeInfo": {"kubeletVersion": "v1.32.0"}}}]}
+        with unittest.mock.patch("gate_check.kubectl_json", return_value=nodes):
+            gate_check.check_com002a("1.34", "1.33")
+        output = capsys.readouterr().out
+        assert "노드: ec2-old(v1.32.0); Fargate: fg-old(v1.32.0)" in output
+        assert "restart those Fargate pods before the Control Plane upgrade" in output
+        assert gate_check.high_warn == 1 and gate_check.critical_fail == 0
+
+
+class TestCom005AutoMode:
+    @pytest.mark.parametrize("cluster, fail", [({"computeConfig": {"enabled": True}}, 1),
+                                               ({"computeConfig": {"enabled": False}}, 0),
+                                               ({}, 0), ({"computeConfig": {"enabled": "false"}}, 1)])
+    def test_auto_mode_enabled_is_critical_missing_field_is_disabled(self, cluster, fail):
+        result = subprocess.CompletedProcess([], 0, json.dumps({"cluster": cluster}), "")
+        with unittest.mock.patch("gate_check.run_cmd", return_value=result):
+            gate_check.check_com005("demo")
+        assert gate_check.critical_fail == fail
+
+    @pytest.mark.parametrize("code, body", [(1, ""), (0, "bad-json"), (0, "{}")])
+    def test_describe_failure_or_malformed_response_fails(self, code, body):
+        with unittest.mock.patch("gate_check.run_cmd", return_value=subprocess.CompletedProcess([], code, body, "")):
+            gate_check.check_com005("demo")
+        assert gate_check.critical_fail == 1
+
+
+class TestInf005ControlPlaneSubnets:
+    @pytest.mark.parametrize("subnets, fail", [
+        ([{"SubnetId": "cp-a", "AvailableIpAddressCount": 5}, {"SubnetId": "cp-b", "AvailableIpAddressCount": 6}], 0),
+        ([{"SubnetId": "cp-a", "AvailableIpAddressCount": 4}, {"SubnetId": "cp-b", "AvailableIpAddressCount": 128}], 1),
+        ([], 1), ([{"SubnetId": "cp-a", "AvailableIpAddressCount": 5}], 1),
+        ([{"SubnetId": "cp-a"}], 1), ([{"SubnetId": "cp-a", "AvailableIpAddressCount": "5"}], 1)])
+    def test_each_cp_subnet_needs_five_ips_and_complete_data(self, subnets, fail):
+        results = [subprocess.CompletedProcess([], 0, json.dumps({"cluster": {
+            "resourcesVpcConfig": {"subnetIds": ["cp-a", "cp-b"]}}}), ""),
+            subprocess.CompletedProcess([], 0, json.dumps({"Subnets": subnets}), "")]
+        with unittest.mock.patch("gate_check.run_cmd", side_effect=results) as run:
+            gate_check.check_inf005("demo")
+        assert gate_check.critical_fail == fail
+        assert run.call_args.args[0][3:6] == ["--subnet-ids", "cp-a", "cp-b"]
+
+    @pytest.mark.parametrize("failure_at, code, body", [
+        (0, 1, ""), (0, 0, "bad-json"), (0, 0, "{}"),
+        (0, 0, '{"cluster":{"resourcesVpcConfig":{"subnetIds":[]}}}'),
+        (1, 1, ""), (1, 0, "bad-json"), (1, 0, "{}")])
+    def test_describe_failure_or_missing_data_is_critical(self, failure_at, code, body):
+        results = [subprocess.CompletedProcess([], 0, '{"cluster":{"resourcesVpcConfig":{"subnetIds":["cp-a"]}}}', "")]
+        results[failure_at:] = [subprocess.CompletedProcess([], code, body, "")]
+        with unittest.mock.patch("gate_check.run_cmd", side_effect=results):
+            gate_check.check_inf005("demo")
+        assert gate_check.critical_fail == 1
+
+
+@pytest.mark.parametrize("rule, function, payload", [
+    ("COM-005", "check_com005", {"cluster": {"computeConfig": {"enabled": True}}}),
+    ("INF-005", "check_inf005", {"cluster": {"resourcesVpcConfig": {"subnetIds": []}}})])
+def test_new_critical_rules_exit_one_with_final_next_stop(tmp_path, capsys, rule, function, payload):
+    from contextlib import ExitStack
+    log = tmp_path / "audit.log"
+    with ExitStack() as stack:
+        for name in vars(gate_check):
+            if name.startswith("check_") and name != function:
+                stack.enter_context(unittest.mock.patch.object(gate_check, name))
+        stack.enter_context(unittest.mock.patch("gate_check.shutil.which", return_value="/fake/bin"))
+        stack.enter_context(unittest.mock.patch("gate_check.run_cmd", return_value=
+                           subprocess.CompletedProcess([], 0, json.dumps(payload), "")))
+        stack.enter_context(unittest.mock.patch("sys.argv", [
+            "gate_check.py", "--cluster-name", "demo", "--current-version", "1.33",
+            "--target-version", "1.34", "--audit-log", str(log)]))
+        with pytest.raises(SystemExit) as exc:
+            gate_check.main()
+    assert exc.value.code == 1
+    assert capsys.readouterr().out.splitlines()[-1].startswith("NEXT: STOP")
+    from lib import parse_audit_line
+    rows = [row for line in log.read_text().splitlines() if (row := parse_audit_line(line))]
+    assert any(row["rule_id"] == rule and row["result"] == "FAIL" and
+               row["severity"] == "CRITICAL" for row in rows)

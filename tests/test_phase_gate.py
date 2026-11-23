@@ -3138,3 +3138,46 @@ class TestNodeConditionDefensive:
             # 크래시 없이 실행되어야 함
             rc = phase_gate.gate_phase4("my-cluster", "1.34", audit_log)
         assert rc in (0, 1, 2)  # 어떤 결과든 크래시 없이 반환
+
+
+class TestPhase4NodeScope:
+    @staticmethod
+    def node(name, version, labels=None):
+        return {"metadata": {"name": name, "labels": labels or {}}, "status": {
+            "nodeInfo": {"kubeletVersion": version},
+            "conditions": [{"type": "Ready", "status": "True"}]}}
+
+    @pytest.mark.parametrize("workers", [[], [node.__func__("mng", "v1.34.0")]])
+    def test_phase4_excludes_karpenter_and_fargate(self, tmp_path, workers):
+        nodes = workers + [self.node("karp", "v1.33.0", {"karpenter.sh/nodepool": ""}),
+                           self.node("fg", "v1.33.0", {"eks.amazonaws.com/compute-type": "fargate"})]
+        def run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"items": nodes if "nodes" in cmd else []}), "")
+        log = str(tmp_path / "audit.log")
+        with unittest.mock.patch("phase_gate.run_cmd", side_effect=run):
+            assert phase_gate.gate_phase4("demo", "1.34", log, node_scope="mng") == 0
+        assert "Karpenter 1 → phase5, Fargate 1 → phase7" in open(log).read()
+
+    @pytest.mark.parametrize("labels", [{}, {"eks.amazonaws.com/nodegroup": "mng"}])
+    def test_phase4_still_checks_mng_and_unlabeled_nodes(self, tmp_path, labels):
+        data = {"items": [self.node("old", "v1.33.0", labels)]}
+        with unittest.mock.patch("phase_gate.run_cmd", return_value=subprocess.CompletedProcess([], 0, json.dumps(data), "")):
+            log = str(tmp_path / "audit.log")
+            assert phase_gate.gate_phase4("demo", "1.34", log, node_scope="mng") == 1
+        assert "Karpenter 0 → phase5, Fargate 0 → phase7" in open(log).read()
+
+    def test_phase4_empty_cluster_still_fails(self, tmp_path):
+        with unittest.mock.patch("phase_gate.run_cmd", return_value=subprocess.CompletedProcess([], 0, '{"items": []}', "")):
+            assert phase_gate.gate_phase4("demo", "1.34", str(tmp_path / "audit.log"), node_scope="mng") == 1
+
+    @pytest.mark.parametrize("labels", [{"karpenter.sh/nodepool": "default"},
+                                       {"eks.amazonaws.com/compute-type": "fargate"}])
+    def test_phase7_still_checks_all_node_types(self, tmp_path, labels):
+        nodes = [self.node("old", "v1.33.0", labels)]
+        def run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(
+                {"items": nodes} if "nodes" in cmd else {"insights": []}), "")
+        with unittest.mock.patch("phase_gate.gate_phase2", return_value=0), \
+             unittest.mock.patch("phase_gate.gate_phase3", return_value=0), \
+             unittest.mock.patch("phase_gate.run_cmd", side_effect=run):
+            assert phase_gate.gate_phase7("demo", "1.34", str(tmp_path / "audit.log")) == 1

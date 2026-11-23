@@ -72,13 +72,13 @@ python3 scripts/gate_check.py \
   --audit-log audit.log
 ```
 
-It checks 18 rules: COM-001 cluster health, COM-002 minor +1, COM-002a kubelet skew, COM-003 add-on
-status/compatibility, COM-004 EKS Insights, WLS-001 PDB `disruptionsAllowed=0`, WLS-002 single replica,
+It checks 20 rules: COM-001 cluster health, COM-002 minor +1, COM-002a kubelet skew, COM-003 add-on
+status/compatibility, COM-004 EKS Insights, COM-005 Auto Mode unsupported (CRITICAL), WLS-001 PDB `disruptionsAllowed=0`, WLS-002 single replica,
 WLS-003 PV zone affinity, WLS-004 hostPath pods, WLS-005 long-running jobs, WLS-006 topology
 constraints, CAP-001 node headroom (from requests; relaxed to MEDIUM on Karpenter when actual usage
 fits), CAP-002 pressure pods, CAP-003 subnet IPs, INF-001 Terraform drift (info-only, never blocks),
 INF-002 AMI in SSM, INF-003 Karpenter compatibility, INF-004 data-plane recreate (SKIP when INF-001's
-plan could not run).
+plan could not run), INF-005 Control Plane subnet available IPs ≥ 5 (CRITICAL; missing data fails).
 
 - **Transient false BLOCK**: right after a previous upgrade, Karpenter may still be replacing nodes, so
   COM-001 or WLS-001 can flip to CRITICAL. If `kubectl get nodes` / `kubectl get pdb -A` show it
@@ -96,6 +96,14 @@ plan could not run).
   재실행: (the gate_check.py command above)
   ```
 - **Exit 2** → the HIGH/MEDIUM findings go into the interview for confirmation.
+- **COM-002a WARN**: kubelets below the current Control Plane minor need attention before its
+  upgrade; this WARN does not relax the target n-3 CRITICAL limit. Fargate nodes are listed separately.
+  Show the affected Fargate nodes and their pods/owners (`kubectl get pods -A -o wide`), ask for an
+  exact approval word before restarting them, and record that answer with `audit_event.py` as
+  `ASK_USER`. After approval, restart those owners with `kubectl rollout restart <kind>/<name> -n <ns>`
+  (an ownerless pod needs an explicit recreation plan). Wait for replacement nodes to be Ready at
+  the **current** CP version, then rerun Phase 0 before proceeding. This preflight restart approval
+  is separate from the later upgrade-plan approval; never restart on a WARN alone.
 - `upgrade_plan.py approve` refuses to run without a Phase 0 result for this cluster/target that has
   no FAIL and comes after the discovery record. Rerun Phase 0 after the user fixes a finding.
 

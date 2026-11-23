@@ -83,8 +83,14 @@ def aws(args, state, scenario):
         return render({'Parameter': {'Name': option(args, '--name'),
                                      'Value': target_image(scenario)}}, args), 0
     if (service, operation) == ('ec2', 'describe-subnets'):
-        return render({'Subnets': [{'SubnetId': 'subnet-demo',
-                                   'AvailableIpAddressCount': 128}]}, args), 0
+        subnet_ids = []
+        if '--subnet-ids' in args:
+            for arg in args[args.index('--subnet-ids') + 1:]:
+                if arg.startswith('-'):
+                    break
+                subnet_ids.append(arg)
+        return render({'Subnets': [{'SubnetId': sid, 'AvailableIpAddressCount': 128}
+                                   for sid in subnet_ids or ['subnet-demo']]}, args), 0
     if service != 'eks':
         raise ValueError('aws operation')
     return eks(operation, args, state, scenario)
@@ -99,7 +105,8 @@ def eks(operation, args, state, scenario):
             state['addons'][state['addon_queue'][0]]['polls'] = scenario['transitions']['addon_polls'] - 1
         cluster = {'name': scenario['cluster_name'], 'version': state['version'],
                    'status': 'UPDATING' if updating else state['status'],
-                   'resourcesVpcConfig': {'subnetIds': ['subnet-demo']},
+                   'computeConfig': {'enabled': False},
+                   'resourcesVpcConfig': {'subnetIds': ['subnet-cp-a', 'subnet-cp-b']},
                    'endpoint': 'https://eks.example.com', 'health': {'issues': []}}
         return render({'cluster': cluster}, args), 0
     if operation == 'list-addons':

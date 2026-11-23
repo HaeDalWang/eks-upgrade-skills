@@ -19,7 +19,15 @@ monitors (`drain_watch.py` / `service_watch.py`), after the report is written.
 ## Failure report
 
 1. Report the exact error, the affected resource and the phase.
-2. Do NOT attempt an automatic rollback: an EKS Control Plane upgrade is irreversible.
+2. Do NOT roll back on your own. If the Control Plane already reached the target, tell the user that
+   EKS allows a rollback to the previous minor within 7 days of the upgrade completing
+   (docs.aws.amazon.com/eks/latest/userguide/rollback-cluster.html) and that it is their decision:
+   - Cluster must be `ACTIVE` with no update in progress; Insights in ERROR/UNKNOWN block it.
+   - Managed node groups at the target must go back first (`aws eks update-nodegroup-version ... --kubernetes-version <previous>`);
+     Fargate nodes cannot be rolled back (delete their Pods first); EKS add-ons stay at their new versions.
+   - The rollback is `aws eks update-cluster-version --kubernetes-version <previous>`; afterwards set the
+     Terraform version variables back to the previous version so the next plan does not upgrade again.
+   Only on the user's exact approval, record it with `audit_event.py --rule-id ROLLBACK`.
 3. Write the tables:
    ```bash
    python3 scripts/report.py --audit-log audit.log --plan-doc "${PLAN_DOC}"

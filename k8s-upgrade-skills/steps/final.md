@@ -44,7 +44,9 @@ the Phase 7 node-version check. The gate cannot fix this; you refresh the pods. 
 
 ## 7-1. Phase 7 gate (always)
 
-It reruns the Phase 2/3/4 checks in-process plus EKS Insights:
+It reruns the Phase 2/3/4 checks in-process plus EKS Insights. The final node version/Ready check
+covers **all** nodes, including Karpenter and Fargate. Phase 4 checks MNG and unlabeled nodes;
+Karpenter is verified in phase5, Fargate in phase7 after the refresh in 7-0:
 
 ```bash
 python3 scripts/phase_gate.py phase7 \

@@ -59,6 +59,11 @@ AI Agent가 사용하는 자격 증명(IAM User/Role, kubeconfig)에 아래 권�
 }
 ```
 
+COM-005는 `eks:DescribeCluster`의 `cluster.computeConfig.enabled`를 읽어 Auto Mode를 차단합니다.
+INF-005는 같은 API의 `cluster.resourcesVpcConfig.subnetIds`와 `ec2:DescribeSubnets`의
+`AvailableIpAddressCount`를 읽습니다. 위 Phase 0 정책에 두 권한이 이미 포함되어 있으며,
+CP 서브넷은 MNG 서브넷과 달라도 모두 조회 가능해야 합니다. 조회 실패/누락은 CRITICAL FAIL입니다.
+
 ### Phase 1~7: 업그레이드 실행 (쓰기 포함)
 
 ```json

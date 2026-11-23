@@ -90,7 +90,7 @@ kubectl scale deployment <NAME> -n <NS> --replicas=2
 
 ### Control Plane status=FAILED
 
-EKS Control Plane 업그레이드는 비가역적입니다. 다운그레이드할 수 없습니다.
+업그레이드가 완료된 뒤 7일 안에는 이전 minor로 롤백할 수 있습니다(N→N-1 한 단계, 클러스터 `ACTIVE`, 목표 버전 MNG를 먼저 되돌려야 함, Add-on은 되돌아가지 않음, Fargate는 롤백 미지원). 7일이 지나면 다운그레이드할 수 없습니다. 롤백 여부는 사용자가 결정합니다 — https://docs.aws.amazon.com/eks/latest/userguide/rollback-cluster.html
 
 ```bash
 # 1. 현재 상태 확인
