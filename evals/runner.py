@@ -103,7 +103,7 @@ def prepare(run, scenario, claude):
     generalize_project(run / 'project', scenario)
     if scenario.get('recipe'):
         (run / 'project/recipe.md').write_text(scenario['recipe'])
-    (run / 'scenario.json').write_text(json.dumps(scenario, ensure_ascii=False, indent=2))
+    (run / 'scenario.json').write_text(json.dumps({**scenario, 'safety_checks_version': 2}, ensure_ascii=False, indent=2))
     state = {**scenario['initial_state'], 'initial_version': scenario['current_version'],
              'topology': scenario['topology']}
     (run / 'state.json').write_text(json.dumps(state))

@@ -21,13 +21,19 @@ if args and Path(args[0]).name == 'gate_check.py':
             state['pdb_remaining'] = int(count < scenario['transitions']['preflight_blocks'])
             state['preflight_runs'] = count + 1
             (run / 'state.json').write_text(json.dumps(state))
-result = subprocess.run([sys.executable, *args], check=False)
-if args and Path(args[0]).name in ('phase_gate.py', 'gate_check.py'):
+tracked = bool(args and Path(args[0]).name in (
+    'phase_gate.py', 'gate_check.py', 'plan_check.py', 'apply_guard.py'))
+result = subprocess.run([sys.executable, *args], check=False,
+                        capture_output=tracked, text=tracked)
+if tracked:
+    print(result.stdout, end='')
+    print(result.stderr, end='', file=sys.stderr)
+if tracked:
     with (run / 'state.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         with (run / 'calls.jsonl').open('a') as log:
             log.write(json.dumps({'tool': 'python3', 'argv': args, 'ts': started,
                 'finished': datetime.now(timezone.utc).isoformat(), 'exit': result.returncode,
-                'stderr': '', 'effects': [], 'audit_lines': audit_lines,
+                'stdout': result.stdout, 'stderr': result.stderr, 'effects': [], 'audit_lines': audit_lines,
                 'audit_end': len(audit.read_text().splitlines()) if audit.exists() else 0}) + '\n')
 sys.exit(result.returncode)

@@ -19,6 +19,12 @@ import pytest
 import phase_gate
 
 
+@pytest.fixture(autouse=True)
+def fixed_audit_revision(monkeypatch):
+    # Keep Terraform subprocess mocks scoped to Terraform; test revision separately.
+    monkeypatch.setattr("lib.skill_revision", lambda: "test-revision")
+
+
 # ══════════════════════════════════════════════════════════════
 # 헬퍼: argparse parser 생성 (main() 내부 parser를 재구성)
 # ══════════════════════════════════════════════════════════════
@@ -2961,9 +2967,7 @@ class TestAuditLogAppend:
 
     def test_audit_flush_appends_not_overwrites(self, tmp_path):
         """두 번 flush 후 양쪽 기록이 모두 존재해야 함."""
-        import importlib
         import lib
-        importlib.reload(lib)
 
         audit_path = str(tmp_path / "audit.log")
 
@@ -2987,9 +2991,7 @@ class TestAuditLogAppend:
 
     def test_audit_init_empty_current_version_no_dirty_header(self, tmp_path):
         """phase_gate처럼 current_ver=''를 넘겨도 '# Upgrade:  → X' 오염이 없어야 함."""
-        import importlib
         import lib
-        importlib.reload(lib)
         audit_path = str(tmp_path / "audit.log")
         lib.reset_gate()
         lib.audit_init("dev-cluster", "", "1.34")
@@ -3002,9 +3004,7 @@ class TestAuditLogAppend:
 
     def test_audit_init_all_empty_graceful(self, tmp_path):
         """phase3/6처럼 cluster/version 모두 빈 경우에도 헤더가 깨지지 않아야 함."""
-        import importlib
         import lib
-        importlib.reload(lib)
         audit_path = str(tmp_path / "audit.log")
         lib.reset_gate()
         lib.audit_init("", "", "")

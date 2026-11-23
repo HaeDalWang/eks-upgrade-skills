@@ -4,6 +4,12 @@ import re
 import warnings
 from pathlib import Path
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "k8s-upgrade-skills/scripts"))
+from lib import parse_audit_line
+
+from .safety_checks import SAFETY_ASSERTIONS, safety_checks
 from .scenario_checks import scenario_checks
 from .batch2_checks import batch2_checks
 
@@ -51,9 +57,10 @@ def infra_evidence(run):
 def records(lines):
     result = []
     for number, line in enumerate(lines, 1):
-        fields = line.split(' | ', 3)
-        if len(fields) == 4:
-            result.append((number, fields[0], fields[1], fields[2], fields[3]))
+        parsed = parse_audit_line(line)
+        if parsed is not None:
+            result.append((number, parsed['timestamp'], parsed['rule_id'],
+                           parsed['result'], parsed['detail']))
     return result
 
 
@@ -107,9 +114,12 @@ def grade(run):
     path = run / 'scenario.json'
     scenario = json.loads((path if path.exists() else Path(__file__).parent /
                            'scenarios/normal-karpenter-fargate.json').read_text())
+    assertions = list(scenario['assertions'])
+    if scenario.get('safety_checks_version') == 2:
+        assertions.extend(SAFETY_ASSERTIONS)
     result = {}
     def check(name, passed, evidence):
-        if name not in scenario['assertions']:
+        if name not in assertions:
             return
         result[name] = {'result': 'PASS' if passed else 'FAIL', 'evidence': evidence}
     def before(call, rule, text=''):
@@ -146,7 +156,9 @@ def grade(run):
     summary_path = run / 'summary.json'
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
     batch2_checks(check, scenario, calls, audit, applies, before, users, final, summary)
-    missing = set(scenario['assertions']) - result.keys()
+    if scenario.get('safety_checks_version') == 2:
+        safety_checks(check, calls, audit, users)
+    missing = set(assertions) - result.keys()
     if missing:
         raise ValueError(f'unknown assertions: {sorted(missing)}')
     (run / 'grade.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')

@@ -8,6 +8,7 @@ lib.py — gate_check.py / phase_gate.py 공통 헬퍼 모듈
 Python 3.9+ stdlib only — 서드파티 의존성 없음.
 """
 
+import argparse
 import fcntl
 import json
 import subprocess
@@ -101,6 +102,49 @@ def reset_gate() -> None:
 # ══════════════════════════════════════════════════════════════
 # 감사 로그
 # ══════════════════════════════════════════════════════════════
+def parse_audit_line(line: str) -> Optional[dict]:
+    """Parse current five-column and historical four-column records.
+
+    The detail may itself contain ` | `; comments and malformed lines are ignored.
+    """
+    fields = line.rstrip("\n").split(" | ", 4)
+    if len(fields) < 4 or fields[0].startswith("#"):
+        return None
+    results = {"PASS", "FAIL", "WARN", "SKIP", "INFO", "ENTER", "START", "STOP"}
+    severities = {"-", "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}
+    if len(fields) == 5 and fields[2] in severities and fields[3] in results:
+        timestamp, rule_id, severity, result, detail = fields
+    else:
+        timestamp, rule_id, result, detail = line.rstrip("\n").split(" | ", 3)
+        severity = "-"
+    if result not in results:
+        return None
+    return dict(timestamp=timestamp, rule_id=rule_id, severity=severity,
+                result=result, detail=detail)
+
+
+def skill_revision() -> str:
+    """Identify the actual skill checkout, never the caller's Terraform repo."""
+    skill_dir = Path(__file__).resolve().parent.parent
+    result = run_cmd(["git", "-C", str(skill_dir), "rev-parse", "--short", "HEAD"])
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    for name in ("VERSION", ".install-version"):
+        marker = skill_dir / name
+        if marker.is_file():
+            return marker.read_text(encoding="utf-8").strip() or "unknown"
+    return "unknown"
+
+
+def _audit_line(rule_id: str, result: str, detail: str,
+                severity: Optional[str] = None) -> str:
+    severity = severity or {"FAIL": "CRITICAL", "WARN": "HIGH"}.get(result, "-")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fields = [now, rule_id, severity, result, detail]
+    return " | ".join(str(value).replace("\r", "\\r").replace("\n", "\\n")
+                      for value in fields)
+
+
 def audit_init(cluster_name: str, current_ver: str, target_ver: str) -> None:
     """audit 헤더 작성. phase_gate는 current_ver를 모를 때 빈 문자열을 넘기는데,
     그대로 두면 `# Upgrade:  → 1.34`처럼 헤더가 오염된다. 빈 값을 graceful하게 처리한다."""
@@ -118,40 +162,52 @@ def audit_init(cluster_name: str, current_ver: str, target_ver: str) -> None:
         cluster_line,
         version_line,
         f"# Started: {now}",
+        f"# Skill commit: {skill_revision()}",
         "# ──────────────────────────────────────────",
     ])
 
 
-def audit_write(rule_id: str, result: str, detail: str) -> None:
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    _gate.audit_lines.append(f"{now} | {rule_id} | {result} | {detail}")
+def audit_write(rule_id: str, result: str, detail: str,
+                severity: Optional[str] = None) -> None:
+    _gate.audit_lines.append(_audit_line(rule_id, result, detail, severity))
 
 
 def audit_flush(path: str) -> None:
+    """Summarize records in this block, including direct phase audit_write calls."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    gate = "BLOCKED" if _gate.critical_fail > 0 else ("WARN" if _gate.high_warn > 0 else "OPEN")
-    _gate.audit_lines.extend([
+    rows = [row for line in _gate.audit_lines if (row := parse_audit_line(line))
+            and row["result"] not in {"ENTER", "START", "STOP", "SKIP"}
+            and not row["rule_id"].removeprefix("PHASE").isdigit()]
+    fails = sum(row["result"] == "FAIL" and row["severity"] in {"CRITICAL", "-"}
+                for row in rows)
+    warns = sum(row["result"] == "WARN" or
+                (row["result"] == "FAIL" and row["severity"] == "HIGH") for row in rows)
+    info = sum(row["result"] == "FAIL" and row["severity"] in {"MEDIUM", "LOW"}
+               for row in rows)
+    passed = sum(row["result"] == "PASS" for row in rows)
+    gate = "BLOCKED" if fails else ("WARN" if warns else "OPEN")
+    header_end = next((i for i, line in enumerate(_gate.audit_lines)
+                       if not line.startswith("#")), len(_gate.audit_lines))
+    lines = (_gate.audit_lines[:header_end] +
+             [f"# Executed rules: {len({row['rule_id'] for row in rows})}"] +
+             _gate.audit_lines[header_end:])
+    lines.extend([
         "# ──────────────────────────────────────────",
-        f"# Summary: CRITICAL_FAIL={_gate.critical_fail} HIGH_WARN={_gate.high_warn} MEDIUM_INFO={_gate.medium_info} PASS={_gate.total_pass}/{_gate.total_rules}",
+        f"# Summary: CRITICAL_FAIL={fails} HIGH_WARN={warns} MEDIUM_INFO={info} PASS={passed}/{len(rows)}",
         f"# Gate: {gate}",
         f"# Finished: {now}",
     ])
-    new_content = "\n".join(_gate.audit_lines) + "\n"
     with open(path, "a", encoding="utf-8") as f:
-        f.write(new_content)
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write("\n".join(lines) + "\n")
+        fcntl.flock(f, fcntl.LOCK_UN)
     _gate.audit_lines.clear()
 
 
-def audit_append(path: str, rule_id: str, result: str, detail: str) -> None:
-    """단일 이벤트를 audit.log에 fcntl 락으로 한 줄 append한다.
-
-    gate_check/phase_gate의 버퍼링 방식(_gate.audit_lines)과 달리,
-    인라인 모니터(drain_watch.py)나 단일 이벤트 기록(audit_event.py)이
-    다른 프로세스와 동시에 같은 파일에 안전하게 쓰기 위한 경로.
-    실패 시 OSError를 호출자에게 전파한다.
-    """
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    line = f"{now} | {rule_id} | {result} | {detail}\n"
+def audit_append(path: str, rule_id: str, result: str, detail: str,
+                 severity: Optional[str] = None) -> None:
+    """Append one record under the same lock used by buffered gate writers."""
+    line = _audit_line(rule_id, result, detail, severity) + "\n"
     with open(path, "a", encoding="utf-8") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.write(line)
@@ -180,12 +236,22 @@ def record(rule_id: str, severity: str, result: str, detail: str) -> None:
             _gate.medium_info += 1
             print(f"{CYAN}ℹ️  INFO{NC}  {rule_id:<8s} [{severity}] {detail}")
 
-    audit_write(rule_id, result, detail)
+    audit_write(rule_id, result, detail, severity)
 
 
 # ══════════════════════════════════════════════════════════════
 # CLI 헬퍼
 # ══════════════════════════════════════════════════════════════
+class GateArgumentParser(argparse.ArgumentParser):
+    """Usage errors are FAIL (1); the final stdout line always gives NEXT."""
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        print("{}: error: {}".format(self.prog, message), file=sys.stderr)
+        print("NEXT: STOP invalid arguments: " + message.replace("\n", " "))
+        self.exit(1)
+
+
 def run_cmd(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
     """subprocess wrapper — 실패 시 빈 stdout 반환."""
     try:

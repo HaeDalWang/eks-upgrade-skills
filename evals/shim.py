@@ -416,6 +416,12 @@ def desired(project):
     return values
 
 
+def node_class(alias):
+    return {'yaml_body': json.dumps({'apiVersion': 'karpenter.k8s.aws/v1',
+        'kind': 'EC2NodeClass', 'metadata': {'name': 'default'},
+        'spec': {'amiSelectorTerms': [{'alias': alias}]}})}
+
+
 def plan(project, args, state):
     values = desired(project)
     changes = []
@@ -430,16 +436,19 @@ def plan(project, args, state):
     if state['topology']['mng'] and alias != state['ami_alias'] and (not targets or any(t.startswith('module.eks') for t in targets)):
         changes.append({'address': 'module.eks.module.eks_managed_node_group["system-node"].aws_eks_node_group.this[0]',
             'type': 'aws_eks_node_group', 'change': {'actions': ['update'],
-                'before': {'ami_alias': state['ami_alias']}, 'after': {'ami_alias': alias}}})
+                'before': {'release_version': state['ami_alias'], 'version': state['node_version']},
+                'after': {'release_version': alias, 'version': version}}})
     if state['topology']['karpenter'] and alias != state['ami_alias'] and (not targets or any('karpenter_default_node_class' in t for t in targets)):
         changes.append({'address': 'kubectl_manifest.karpenter_default_node_class',
             'type': 'kubectl_manifest', 'change': {'actions': ['update'],
-                'before': {'ami_alias': state['ami_alias']}, 'after': {'ami_alias': alias}}})
+                'before': node_class(state['ami_alias']), 'after': node_class(alias)}})
     if state.get('unexpected_replace') and any(c['type'] == 'aws_eks_cluster' for c in changes):
         changes.append({'address': 'aws_launch_template.workers', 'type': 'aws_launch_template',
             'change': {'actions': ['delete', 'create'], 'before': {'name': 'demo-old'},
                        'after': {'name': 'demo-new'}}})
-    return {'format_version': '1.2', 'terraform_version': '1.13.0', 'resource_changes': changes}
+    return {'format_version': '1.2', 'terraform_version': '1.13.0',
+            'variables': {key: {'value': value} for key, value in values.items()},
+            'resource_changes': changes}
 
 
 def apply_changes(changes, state, scenario):
@@ -459,12 +468,14 @@ def apply_changes(changes, state, scenario):
             effects.append('control_plane')
         elif entry['type'] == 'aws_eks_node_group':
             state.setdefault('mng_release', state['ami_alias'])
-            state['mng_release_target'] = after['ami_alias']
-            state.update(ami_alias=after['ami_alias'], node_target=state['version'],
+            state['mng_release_target'] = after['release_version']
+            state.update(ami_alias=after['release_version'], node_target=state['version'],
                          mng_remaining=transitions['node_polls'])
             effects.extend(['node_replacement', 'mng_rollout'])
         elif entry['type'] == 'kubectl_manifest':
-            state.update(ami_alias=after['ami_alias'], node_target=state['version'],
+            manifest = json.loads(after['yaml_body'])
+            alias = manifest['spec']['amiSelectorTerms'][0]['alias']
+            state.update(ami_alias=alias, node_target=state['version'],
                          node_remaining=transitions['node_polls'])
             state['service_remaining'] = transitions.get('service_polls', 0)
             effects.append('node_replacement')

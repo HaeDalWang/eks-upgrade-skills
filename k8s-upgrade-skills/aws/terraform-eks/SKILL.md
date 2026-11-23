@@ -36,9 +36,9 @@ Recipe values are already validated by the root skill router. Read these values 
 
 If `auth_prefix` is set in the recipe, **prefix every `terraform` and `aws` command with it** (e.g. `aws-runas my-profile terraform plan ...`). `kubectl` uses the active kubeconfig context.
 
-- **terraform** plans/applies: use `--var-file="${TF_VAR_FILE}"` when `tf_var_file` is set (workspace-specific tfvars).
+- **terraform** plans: use `-var-file="${TF_VAR_FILE}"` when `tf_var_file` is set (workspace-specific tfvars). Saved-plan applies take only the planfile; variables and targets are fixed by the plan.
 - **MFA sessions expire** (often 1h). A long Control Plane upgrade can outlast the session. Before starting, refresh the session once (e.g. `aws-runas my-profile aws sts get-caller-identity`); if a poll fails mid-upgrade with an auth error, re-authenticate and continue — the upgrade itself is unaffected.
-- The gate scripts (`gate_check.py`, `phase_gate.py`) call `kubectl`/`aws` directly and inherit the shell's `AWS_PROFILE`/kubeconfig. For `terraform`, pass the recipe `auth_prefix` via **`--auth-prefix`** (Phase 0 `gate_check.py`, Phase 6 `phase_gate.py phase6`) so the script runs `terraform` under the correct auth (e.g. `aws-runas`). Without it, `INF-001` may be unable to run `terraform plan` — that is **info-only** (see Phase 0) and does not block the gate — but the **Phase 6** gate does block, so `--auth-prefix`/`--tf-var-file` there are required for auth-prefixed environments.
+- The gate scripts (`gate_check.py`, `phase_gate.py`) call `kubectl`/`aws` directly and inherit the shell's `AWS_PROFILE`/kubeconfig. For `terraform`, pass the recipe `auth_prefix` via **`--auth-prefix`** (Phase 0 `gate_check.py`, Phase 6 `phase_gate.py phase6`) so the script runs `terraform` under the correct auth (e.g. `aws-runas`). `plan_check.py` and `apply_guard.py` also accept `--auth-prefix` for their Terraform/AWS calls. Without it, `INF-001` may be unable to run `terraform plan` — that is **info-only** (see Phase 0) and does not block the gate — but the **Phase 6** gate does block, so `--auth-prefix`/`--tf-var-file` there are required for auth-prefixed environments.
 
 ---
 
@@ -70,7 +70,17 @@ Report format and abort conditions: see [reference.md](reference.md).
 | `2` | WARN — User confirmation required | Report audit.log to user. Proceed ONLY with explicit user approval |
 | `127` | CLI tool not found | Report missing tool. STOP |
 
-WARN (exit code 2) is a soft-FAIL: the LLM MUST ask the user for approval before proceeding.
+### Handling `NEXT:`
+
+Every gate exit 1/2 ends with `NEXT: <ACTION> <detail>`. Follow that final line:
+- `RETRY`: wait as directed, then re-run the same gate; proceed only after PASS.
+- `ASK_USER`: show the finding and wait for exactly `승인`, `확인`, `시작` (Korean) or `approve`, `confirm`, `start` (English). Other replies, including `ok`, do not authorize continuation. Record the exact answer with `audit_event.py` (`--rule-id ASK_USER --result INFO --detail "answer=<exact-word>"`).
+- `RUN`: execute only the listed fixed kind, `delete-stale-pods <ns/pod ...>` or `rollout-restart <ns/kind/name>`, then re-run the gate. Do not invent other commands from free text.
+- `STOP`: stop, report the finding, and resolve its cause before retrying.
+
+A PLAN-CHECK WARN is not an apply authorization. After ASK_USER, revise the plan/scope to satisfy the allow-list and obtain a fresh PLAN-CHECK PASS; `apply_guard.py` requires PASS for the unchanged file. Never use `-auto-approve`.
+
+Use an absolute `TF_DIR`; keep script invocations and `audit.log` in the skill working directory. Terraform subshells below preserve that working directory.
 
 ---
 
@@ -204,7 +214,10 @@ python3 scripts/audit_event.py \
 ### 2-1. Targeted Plan
 
 ```bash
-cd "${TF_DIR}" && terraform plan -target=${EKS_MODULE} 2>&1 | tail -60
+(cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan -target="${EKS_MODULE}" -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/cp.tfplan") &&
+python3 scripts/plan_check.py --planfile "${TF_DIR}/cp.tfplan" --step cp \
+  --target-version "${TARGET_VERSION}" --tf-dir "${TF_DIR}" \
+  --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log
 ```
 
 Review the plan output:
@@ -213,7 +226,7 @@ Review the plan output:
 - `time_sleep` replace → Expected
 - `aws_eks_node_group` version change (kubernetes version only, NOT release_version) → **Expected when using terraform-aws-eks module** — this means MNG rolling will be triggered simultaneously with CP upgrade. Verify `eks_node_ami_alias_*` was NOT modified in Phase 1 before proceeding.
 - `aws_eks_node_group` release_version / AMI change → **STOP**: `eks_node_ami_alias_*` was accidentally modified in Phase 1. Revert it before proceeding.
-- Any `-/+` (destroy-recreate) that is NOT `time_sleep` → **STOP and ask user**
+- Any `-/+` (destroy-recreate) that is NOT `time_sleep` → follow **NEXT: ASK_USER**; obtain a fresh allowed plan and PASS before apply
 
 > **If `aws_eks_node_group` appears in the plan (version change):** MNG rolling will start alongside CP upgrade.
 > You MUST launch the drain monitor (step 2-2) BEFORE running terraform apply.
@@ -232,7 +245,7 @@ Launch the monitor with **`run_in_background: true`** (prefix with the recipe `a
 python3 scripts/drain_watch.py --phase P2 --scope kube-system --audit-log audit.log
 ```
 
-It polls kube-system Warning events every 30s and appends `DRAIN-P2` entries to audit.log (fcntl-locked — safe alongside gate scripts). While the apply runs, check its output periodically with BashOutput. A `FAIL`-severity line (e.g. `FailedDrain`) means **STOP and investigate**.
+It polls kube-system Warning events every 30s and appends `DRAIN-P2` entries to audit.log (fcntl-locked — safe alongside gate scripts). While the apply runs, check its output periodically with BashOutput. Wait for `DRAIN-P2 | START` with `pid=<pid>` in audit.log before running the guard. A `FAIL`-severity line (e.g. `FailedDrain`) means **STOP and investigate**.
 
 **Terminate after the Phase 2 gate passes**: kill the background shell (KillShell), or pass `--stop-file <path>` at launch and `touch` that path to stop it cleanly.
 
@@ -241,7 +254,11 @@ It polls kube-system Warning events every 30s and appends `DRAIN-P2` entries to 
 Run in background so polling can proceed in parallel:
 
 ```bash
-cd "${TF_DIR}" && terraform apply -target=${EKS_MODULE} -auto-approve 2>&1
+python3 scripts/apply_guard.py --planfile "${TF_DIR}/cp.tfplan" --step cp \
+  --cluster-name "${CLUSTER_NAME}" --target-version "${TARGET_VERSION}" \
+  --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
+# Apply only if both PLAN-CHECK and APPLY-GUARD returned exit 0.
+(cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply "${TF_DIR}/cp.tfplan")
 ```
 
 This typically takes 8–40 minutes for the Control Plane. The MNG rolling update may also be triggered if it was already pending — monitor below.
@@ -254,7 +271,14 @@ This typically takes 8–40 minutes for the Control Plane. The MNG rolling updat
 2. Do **not** re-run apply while the cluster is `UPDATING` (it will 409 again). Poll (step 2-4) until `ACTIVE` + `TARGET_VERSION`.
 3. Once `ACTIVE` at the target version, run apply **once more** to sync terraform state (add-ons, `time_sleep`):
    ```bash
-   cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply -target=${EKS_MODULE} --var-file="${TF_VAR_FILE}" -auto-approve 2>&1
+   (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan -target="${EKS_MODULE}" -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/cp-resync.tfplan") &&
+   python3 scripts/plan_check.py --planfile "${TF_DIR}/cp-resync.tfplan" --step cp \
+     --target-version "${TARGET_VERSION}" --tf-dir "${TF_DIR}" \
+     --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
+   python3 scripts/apply_guard.py --planfile "${TF_DIR}/cp-resync.tfplan" --step cp \
+     --cluster-name "${CLUSTER_NAME}" --target-version "${TARGET_VERSION}" \
+     --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
+   (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply "${TF_DIR}/cp-resync.tfplan")
    ```
    Then proceed to the Phase 2 gate.
 
@@ -263,7 +287,7 @@ This typically takes 8–40 minutes for the Control Plane. The MNG rolling updat
 While the apply runs in background, poll every 60 seconds:
 
 ```bash
-aws eks describe-cluster --name "${CLUSTER_NAME}" \
+${AUTH_PREFIX} aws eks describe-cluster --name "${CLUSTER_NAME}" \
   --query 'cluster.{version:version, status:status}' --output json
 ```
 
@@ -271,16 +295,26 @@ aws eks describe-cluster --name "${CLUSTER_NAME}" \
 
 1. Check MNG status:
    ```bash
-   aws eks list-nodegroups --cluster-name "${CLUSTER_NAME}" --output json | \
+   ${AUTH_PREFIX} aws eks list-nodegroups --cluster-name "${CLUSTER_NAME}" --output json | \
      jq -r '.nodegroups[]' | while read ng; do
-       aws eks describe-nodegroup --cluster-name "${CLUSTER_NAME}" --nodegroup-name "$ng" \
+       ${AUTH_PREFIX} aws eks describe-nodegroup --cluster-name "${CLUSTER_NAME}" --nodegroup-name "$ng" \
          --query '{name:nodegroup.nodegroupName, status:nodegroup.status, version:nodegroup.version}' --output json
      done
    ```
 
 2. If ALL nodegroups are `ACTIVE` + `TARGET_VERSION`:
    - Stop the background terraform apply shell (KillShell)
-   - Run `terraform apply -auto-approve` (no target) to clean up any deposed resources
+   - Create and validate a fresh full saved plan before cleaning up deposed resources. Continue each command only after the preceding command exits 0; an unexpected delete/replace must follow `NEXT: ASK_USER`:
+     ```bash
+     (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/cleanup.tfplan") &&
+     python3 scripts/plan_check.py --planfile "${TF_DIR}/cleanup.tfplan" --step full \
+       --target-version "${TARGET_VERSION}" --tf-dir "${TF_DIR}" \
+       --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
+     python3 scripts/apply_guard.py --planfile "${TF_DIR}/cleanup.tfplan" --step full \
+       --cluster-name "${CLUSTER_NAME}" --target-version "${TARGET_VERSION}" \
+       --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
+     (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply "${TF_DIR}/cleanup.tfplan")
+     ```
    - Proceed to Phase 2 gate
 
 3. If any nodegroup is still `UPDATING`: continue waiting (re-check every 10 minutes)
@@ -292,7 +326,7 @@ aws eks describe-cluster --name "${CLUSTER_NAME}" \
 Poll every 60 seconds:
 
 ```bash
-aws eks describe-cluster --name "${CLUSTER_NAME}" \
+${AUTH_PREFIX} aws eks describe-cluster --name "${CLUSTER_NAME}" \
   --query 'cluster.{version:version, status:status}' --output json
 ```
 
@@ -320,9 +354,9 @@ Interpret exit code per convention table. On PASS, proceed to Phase 3.
 After control plane upgrade, add-ons may take time to reconcile. Wait up to 5 minutes, polling every 30 seconds:
 
 ```bash
-aws eks list-addons --cluster-name "${CLUSTER_NAME}" --query 'addons[]' --output text \
+${AUTH_PREFIX} aws eks list-addons --cluster-name "${CLUSTER_NAME}" --query 'addons[]' --output text \
   | tr '\t' '\n' | while read addon; do
-    aws eks describe-addon --cluster-name "${CLUSTER_NAME}" --addon-name "$addon" \
+    ${AUTH_PREFIX} aws eks describe-addon --cluster-name "${CLUSTER_NAME}" --addon-name "$addon" \
       --query '{name:addon.addonName, version:addon.addonVersion, status:addon.status}' --output json
   done
 ```
@@ -397,9 +431,9 @@ It polls each service's EndpointSlice ready count (vs `min_endpoints`) and HTTP 
 **CRITICAL**: Always read the current amiType before querying AMI versions. This preserves the existing architecture (x86_64 vs arm64) and prevents accidental RI waste.
 
 ```bash
-aws eks list-nodegroups --cluster-name "${CLUSTER_NAME}" --output json | \
+${AUTH_PREFIX} aws eks list-nodegroups --cluster-name "${CLUSTER_NAME}" --output json | \
   jq -r '.nodegroups[]' | while read ng; do
-    aws eks describe-nodegroup --cluster-name "${CLUSTER_NAME}" --nodegroup-name "$ng" \
+    ${AUTH_PREFIX} aws eks describe-nodegroup --cluster-name "${CLUSTER_NAME}" --nodegroup-name "$ng" \
       --query '{name:nodegroup.nodegroupName, amiType:nodegroup.amiType}' --output json
   done
 ```
@@ -426,35 +460,35 @@ Query the latest AMI version for TARGET_VERSION from SSM using the amiType-deriv
 
 ```bash
 # Bottlerocket x86_64 (BOTTLEROCKET_x86_64)
-aws ssm get-parameters-by-path \
+${AUTH_PREFIX} aws ssm get-parameters-by-path \
   --path "/aws/service/bottlerocket/aws-k8s-${TARGET_VERSION}/x86_64/latest" \
   --recursive \
   --query "Parameters[?ends_with(Name, 'image_version')].Value" \
   --output text
 
 # Bottlerocket arm64 (BOTTLEROCKET_ARM_64)
-aws ssm get-parameters-by-path \
+${AUTH_PREFIX} aws ssm get-parameters-by-path \
   --path "/aws/service/bottlerocket/aws-k8s-${TARGET_VERSION}/arm64/latest" \
   --recursive \
   --query "Parameters[?ends_with(Name, 'image_version')].Value" \
   --output text
 
 # AL2023 x86_64 (AL2023_x86_64_STANDARD)
-aws ssm get-parameters-by-path \
+${AUTH_PREFIX} aws ssm get-parameters-by-path \
   --path "/aws/service/eks/optimized-ami/${TARGET_VERSION}/amazon-linux-2023/x86_64/standard" \
   --recursive \
   --query "Parameters[?ends_with(Name, 'image_version')].Value" \
   --output text
 
 # AL2023 arm64 (AL2023_ARM_64_STANDARD)
-aws ssm get-parameters-by-path \
+${AUTH_PREFIX} aws ssm get-parameters-by-path \
   --path "/aws/service/eks/optimized-ami/${TARGET_VERSION}/amazon-linux-2023/arm64/standard" \
   --recursive \
   --query "Parameters[?ends_with(Name, 'image_version')].Value" \
   --output text
 ```
 
-Only query the path that matches the current amiType. Update each `eks_node_ami_alias_*` variable that exists in `terraform.tfvars` to the queried value.
+Only query the path that matches the current amiType. Update each `eks_node_ami_alias_*` variable that exists in `terraform.tfvars` to the queried value. Save its actual variable name as `AMI_VAR` and its approved value as `NEW_AMI`; repeat `--expect-ami-var name=value` for every AMI variable/resource value in the nodes plan. If the variable contains an alias rather than the resolved node-group value, also pass `--expect-ami-var "release_version=${RESOLVED_RELEASE_VERSION}"` with the approved resolved release. The reserved `release_version=value` and `alias=value` options may repeat with different approved values for multiple node groups/NodeClasses; each resource must match its own kind's approved set. Named Terraform variables accept one value each (conflicting duplicates are a usage error). The resulting release_version must be explicit and match the approved value; do not accept null/unknown AMIs.
 
 Record to audit.log:
 
@@ -469,8 +503,11 @@ python3 scripts/audit_event.py \
 ### 4-3. Targeted Plan for MNG
 
 ```bash
-cd "${TF_DIR}" && terraform plan \
-  -target=module.eks.module.eks_managed_node_group 2>&1 | tail -40
+(cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan \
+  -target="${EKS_MODULE}.module.eks_managed_node_group" -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/nodes.tfplan") &&
+python3 scripts/plan_check.py --planfile "${TF_DIR}/nodes.tfplan" --step nodes \
+  --target-version "${TARGET_VERSION}" --expect-ami-var "${AMI_VAR}=${NEW_AMI}" \
+  --tf-dir "${TF_DIR}" --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log
 ```
 
 Review the plan:
@@ -480,11 +517,13 @@ Review the plan:
 ### 4-4. Targeted Apply for MNG
 
 ```bash
-cd "${TF_DIR}" && terraform apply \
-  -target=module.eks.module.eks_managed_node_group -auto-approve 2>&1
+python3 scripts/apply_guard.py --planfile "${TF_DIR}/nodes.tfplan" --step nodes \
+  --cluster-name "${CLUSTER_NAME}" --target-version "${TARGET_VERSION}" \
+  --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
+(cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply "${TF_DIR}/nodes.tfplan")
 ```
 
-This triggers the MNG rolling update. Typical duration: 10–30 minutes per node group.
+Run apply only if the preceding guard exits 0. This triggers the MNG rolling update. Typical duration: 10–30 minutes per node group.
 
 ### 4-5. Monitor Node Rollout
 
@@ -582,16 +621,24 @@ After all component upgrades, run a full plan to catch remaining drift.
 
 ### 6-1. Full Plan and Apply
 
+When Phase 4/5 supplied `--expect-ami-var name=value` options, pass all of those same options (including every approved `release_version` and `alias`) to the full-plan check below. If full sync changes a node AMI or leaves it unknown without an expectation for that kind, PLAN-CHECK exits 2 with `NEXT: ASK_USER`; obtain approved expectations and check again.
+
 ```bash
-cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan -var-file="${TF_VAR_FILE}" 2>&1 | tail -40
+(cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/full.tfplan") &&
+python3 scripts/plan_check.py --planfile "${TF_DIR}/full.tfplan" --step full \
+  --target-version "${TARGET_VERSION}" --tf-dir "${TF_DIR}" \
+  --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log
 ```
 
-(Drop `${AUTH_PREFIX}` / `-var-file` if not in the recipe.)
+(Omit `-var-file` when absent from the recipe; an empty `AUTH_PREFIX` needs no special handling.)
 
-If non-destructive changes exist, apply:
+Only after PLAN-CHECK exits 0, apply the exact saved plan. If it changes nodes, start or keep a drain monitor running before the guard (`DRAIN-P4`/`DRAIN-P5` START with a live PID and no later STOP); restart the appropriate monitor if Phase 4/5 already stopped it:
 
 ```bash
-cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply -var-file="${TF_VAR_FILE}" -auto-approve 2>&1
+python3 scripts/apply_guard.py --planfile "${TF_DIR}/full.tfplan" --step full \
+  --cluster-name "${CLUSTER_NAME}" --target-version "${TARGET_VERSION}" \
+  --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
+(cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply "${TF_DIR}/full.tfplan")
 ```
 
 ### 6-2. Gate Verification
@@ -616,7 +663,7 @@ Interpret exit code per convention table. The script uses `terraform show -json`
 
 > ⚠️ **Do this BEFORE the Phase 7 gate.** EKS **Fargate** nodes do NOT update their kubelet until their pods restart. After a Control Plane upgrade, Fargate nodes linger on the OLD version and will FAIL the Phase 7 node-version check (this caused a Phase 7 FAIL in production). The gate cannot fix this — you must refresh the pods.
 
-**Skip if the cluster has no Fargate profiles** (`aws eks list-fargate-profiles --cluster-name "${CLUSTER_NAME}"` returns empty).
+**Skip if the cluster has no Fargate profiles** (`${AUTH_PREFIX} aws eks list-fargate-profiles --cluster-name "${CLUSTER_NAME}"` returns empty).
 
 1. Detect lingering Fargate nodes below the target version:
    ```bash
@@ -667,7 +714,7 @@ Determine the report type from the outcome and generate using the template in [r
 **How to fill the template:**
 1. Extract Phase start/end times from audit.log (`# Started:` / `# Finished:` lines per phase block)
 2. Calculate duration = Finished − Started for each phase
-3. Extract all WARN/FAIL events from audit.log (all lines matching `{timestamp} | {rule_id} | WARN|FAIL | {detail}`)
+3. Extract all WARN/FAIL events from audit.log with `lib.parse_audit_line` (`timestamp | rule_id | severity | result | detail`; legacy four-field lines are also accepted)
 4. Include inline monitor events (`DRAIN-P*`, `SVC-P*` rule-ids) in the events table
 5. Summarize troubleshooting actions taken during the upgrade in `{TROUBLESHOOTING_LOG}`
 6. Query final cluster state for `{FINAL_CLUSTER_STATE_TABLE}`
@@ -699,7 +746,7 @@ When any phase gate returns exit code 1, take the following action:
 2. **Control Plane first**: Data Plane version must NEVER exceed Control Plane version.
 3. **PDB respect**: If `FailedEvict` occurs, never force-proceed. Report and wait.
 4. **No phase reversal**: Phases execute in strict order 0 → 7. No skipping, no reordering.
-5. **No apply without plan**: Every `terraform apply` must be preceded by `terraform plan` review.
+5. **No apply without checked saved plan**: Every apply uses the unchanged saved plan after PLAN-CHECK PASS and APPLY-GUARD PASS. Run each command only if its predecessor exits 0; after any plan replacement/retry, re-run both checks. Never substitute a recomputed apply.
 6. **Abort on unexpected destroy**: If plan shows unexpected resource destruction, STOP immediately.
 7. **No field-selector for pod phase**: `--field-selector status.phase!=Running` is not supported on EKS API server. Always use JSON + Python for phase-based filtering.
 8. **No silent pod ignore**: Never mark a phase Gate as passed while unhealthy pods exist. Classify every non-Running pod AND every Running pod with NotReady containers (TRANSIENT / STALE / BLOCKING) and resolve before proceeding.

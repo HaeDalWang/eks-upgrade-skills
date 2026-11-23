@@ -19,7 +19,6 @@ Usage:
 --tf-dir 제공 시 INF-001/INF-004 (Terraform drift/recreate) 검증을 추가 실행합니다.
 """
 
-import argparse
 import json
 import re
 import shutil
@@ -36,7 +35,7 @@ from typing import Optional
 try:
     from lib import (
         run_cmd, kubectl_json, _parse_cpu, _parse_mem,
-        audit_init, audit_write, audit_flush, record, GateResult,
+        GateArgumentParser, audit_init, audit_write, audit_flush, record, GateResult,
         RED, YELLOW, GREEN, CYAN, NC,
         SYSTEM_NS, DATA_PLANE_RESOURCES, ADDON_BAD_STATES,
         _gate, reset_gate,
@@ -1132,7 +1131,14 @@ def check_inf003() -> None:
 # main
 # ══════════════════════════════════════════════════════════════
 def main() -> None:
-    parser = argparse.ArgumentParser(
+    """Explicit exit routing for every existing WARN/FAIL path.
+
+    CRITICAL FAIL (any rule or invalid input) -> STOP (exit 1).
+    HIGH FAIL -> ASK_USER (exit 2), for each of:
+      COM-003, COM-004, WLS-002, WLS-006, CAP-001, CAP-003, INF-003, INF-004.
+    MEDIUM/LOW FAIL -> report only (exit 0); no NEXT instruction is needed.
+    """
+    parser = GateArgumentParser(
         description="Phase 0 사전 검증 (gate_check.py)")
     parser.add_argument("--cluster-name", required=True)
     parser.add_argument("--current-version", required=True)
@@ -1157,10 +1163,12 @@ def main() -> None:
     if args.tf_dir:
         tf_path = Path(args.tf_dir)
         if not tf_path.is_dir():
+            print("NEXT: STOP invalid Terraform directory")
             print(f"ERROR: --tf-dir '{args.tf_dir}' is not a directory.", file=sys.stderr)
             sys.exit(1)
         if shutil.which("terraform") is None:
             print("ERROR: 'terraform' not found in PATH.", file=sys.stderr)
+            print("NEXT: STOP terraform not found in PATH")
             sys.exit(1)
 
     print()
@@ -1171,7 +1179,9 @@ def main() -> None:
     print("════════════════════════════════════════════════════════════")
     print()
 
+    reset_gate()
     audit_init(args.cluster_name, args.current_version, args.target_version)
+    audit_write("PHASE0", "ENTER", "gate_check")
 
     # ── 전체 규칙 목록 (SKIPPED 추적용) ──
     ALL_RULES = [
@@ -1267,6 +1277,8 @@ def main() -> None:
           f" | MEDIUM INFO: {_gate.medium_info}")
     print("════════════════════════════════════════════════════════════")
 
+    result = "FAIL" if _gate.critical_fail else ("WARN" if _gate.high_warn else "PASS")
+    audit_write("PHASE0", result, "gate_check result")
     audit_flush(args.audit_log)
 
     if _gate.critical_fail > 0:
@@ -1274,12 +1286,14 @@ def main() -> None:
         print(f"{RED}Gate: BLOCKED — CRITICAL 실패 {_gate.critical_fail}개. "
               f"해결 후 재실행하세요.{NC}")
         print(f"감사 로그: {args.audit_log}")
+        print("NEXT: STOP resolve CRITICAL failures before retrying")
         sys.exit(1)
     elif _gate.high_warn > 0:
         print()
         print(f"{YELLOW}Gate: WARN — HIGH 경고 {_gate.high_warn}개. "
               f"사용자 확인 필요.{NC}")
         print(f"감사 로그: {args.audit_log}")
+        print("NEXT: ASK_USER review HIGH warnings; reply exactly 승인 to continue or 중단 to stop")
         sys.exit(2)
     else:
         print()

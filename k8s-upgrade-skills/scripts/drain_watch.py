@@ -225,8 +225,8 @@ def watch_loop(phase: str, audit_log: str, interval: int, max_duration: int,
 
     print(f"[drain_watch] started — phase={phase} scope={event_scope} "
           f"interval={interval}s max={max_duration}s", flush=True)
-    audit_append(audit_log, rule_id, "INFO",
-                 f"DrainWatch started: scope={event_scope}, interval={interval}s (inline background monitor)")
+    audit_append(audit_log, rule_id, "START",
+                 f"pid={os.getpid()} DrainWatch started: scope={event_scope}, interval={interval}s (inline background monitor)")
 
     start = clock()
     while clock() - start < max_duration:
@@ -271,6 +271,7 @@ def watch_loop(phase: str, audit_log: str, interval: int, max_duration: int,
     summary = (f"DrainWatch finished: events={total['event']} pdb={total['pdb']} "
                f"nodeclaim={total['nodeclaim']} (FAIL={total['fail']})")
     audit_append(audit_log, rule_id, "FAIL" if total["fail"] else "INFO", summary)
+    audit_append(audit_log, rule_id, "STOP", f"pid={os.getpid()} {summary}")
     print(f"[drain_watch] {summary}", flush=True)
     return 1 if total["fail"] else 0
 

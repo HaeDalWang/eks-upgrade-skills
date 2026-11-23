@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from evals import runner
-from evals.grading import grade, read_jsonl
+from evals.grading import grade, read_jsonl, records
 from evals.test_harness import cli, script, update_tfvars
 from evals.test_scenarios import call, finish_cp, sandbox_for, write_calls
 
@@ -45,7 +45,8 @@ def test_fargate_linger_cli_only_owner_restart_refreshes_kubelet(tmp_path):
     assert wrong.returncode == 1 and 'unsupported' in wrong.stderr
     cli(sb, 'kubectl', 'rollout', 'restart', 'deployment/coredns', '-n', 'kube-system')
     assert script(sb, 'phase_gate.py', 'phase7', '--cluster-name', 'demo-eks', '--target-version', '1.34').returncode == 0
-    assert 'PHASE7-FINAL | PASS' in (sb[0] / 'project/audit.log').read_text()
+    assert any(r[2:4] == ('PHASE7-FINAL', 'PASS')
+               for r in records((sb[0] / 'project/audit.log').read_text().splitlines()))
 
 
 def test_phase0_transient_block_cli_pdb_clears_and_real_gate_reopens(tmp_path):
@@ -54,7 +55,8 @@ def test_phase0_transient_block_cli_pdb_clears_and_real_gate_reopens(tmp_path):
     cli(sb, 'kubectl', 'get', 'pdb', '-A', '-o', 'json')
     first = preflight(sb)
     assert first.returncode == 1, first.stdout + first.stderr
-    assert 'WLS-001 | FAIL' in (sb[0] / 'project/audit.log').read_text()
+    assert any(r[2:4] == ('WLS-001', 'FAIL')
+               for r in records((sb[0] / 'project/audit.log').read_text().splitlines()))
     pdb = json.loads(cli(sb, 'kubectl', 'get', 'pdb', '-A', '-o', 'json').stdout)
     assert pdb['items'][0]['status']['disruptionsAllowed'] == 1
     assert preflight(sb).returncode == 0
@@ -76,8 +78,10 @@ def test_service_blip_cli_zero_for_n_polls_recovers_and_real_watch_audits(tmp_pa
                     '--services-json', services, '--interval', '1', '--max-duration', '2')
     assert result.returncode == 0, result.stderr
     audit = (sb[0] / 'project/audit.log').read_text()
-    assert 'SVC-P5 | INFO | ServiceWatch started' in audit
-    assert 'SVC-P5 | WARN | default/web: ready_endpoints=0' in audit
+    assert any(r[2:4] == ('SVC-P5', 'INFO') and 'ServiceWatch started' in r[4]
+               for r in records(audit.splitlines()))
+    assert any(r[2:4] == ('SVC-P5', 'WARN') and 'default/web: ready_endpoints=0' in r[4]
+               for r in records(audit.splitlines()))
     assert ready_endpoints(sb) == 2
 
 
@@ -90,7 +94,8 @@ def test_unexpected_replace_cli_cp_plan_json_text_and_real_inf004(tmp_path):
     plan = json.loads(cli(sb, 'terraform', 'show', '-json', 'cp.plan').stdout)
     assert plan['resource_changes'][-1]['change']['actions'] == ['delete', 'create']
     assert preflight(sb).returncode == 1
-    assert 'INF-004 | FAIL | Data Plane recreate' in (sb[0] / 'project/audit.log').read_text()
+    assert any(r[2:4] == ('INF-004', 'FAIL') and r[4].startswith('Data Plane recreate')
+               for r in records((sb[0] / 'project/audit.log').read_text().splitlines()))
     user = runner.select_answer(sb[0], sb[2], None, sb[1], 0, 'replace 진행 승인?', 1)
     assert user['answer_text'] == '중단' and not user['approval']
 
@@ -100,7 +105,8 @@ def test_phase0_critical_cli_skew_does_not_clear(tmp_path):
     assert preflight(sb).returncode == 1
     assert preflight(sb).returncode == 1
     audit = (sb[0] / 'project/audit.log').read_text()
-    assert audit.count('COM-002a | FAIL | kubelet skew > 3') == 2
+    assert sum(r[2:4] == ('COM-002a', 'FAIL') and r[4].startswith('kubelet skew > 3')
+               for r in records(audit.splitlines())) == 2
     assert not any('apply' in c['argv'] for c in read_jsonl(sb[0] / 'calls.jsonl'))
 
 

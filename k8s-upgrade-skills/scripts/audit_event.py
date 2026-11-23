@@ -18,6 +18,7 @@ Exit codes:
 """
 
 import argparse
+import re
 import sys
 
 try:
@@ -44,6 +45,15 @@ def main() -> int:
     )
     parser.add_argument("--detail", required=True, help="이벤트 상세 내용")
     args = parser.parse_args()
+
+    # Only the owning deterministic scripts may assert machine safety evidence.
+    if (not re.fullmatch(r"[A-Z0-9][A-Z0-9-]*", args.rule_id)
+            or args.rule_id in {"PLAN-CHECK", "APPLY-GUARD"}
+            or re.fullmatch(r"PHASE[0-9]+", args.rule_id)
+            or (args.rule_id.startswith("DRAIN-")
+                and args.detail.split(" ", 1)[0] in {"START", "STOP"})):
+        print("ERROR: reserved machine audit record or invalid rule-id", file=sys.stderr)
+        return 1
 
     try:
         audit_append(args.audit_log, args.rule_id, args.result, args.detail)

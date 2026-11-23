@@ -30,6 +30,14 @@ python3 k8s-upgrade-skills/scripts/phase_gate.py phase4 \
   --target-version 1.34 \
   --audit-log audit.log
 
+# saved plan 검증 후 apply 직전 안전장치 (terraform plan -out으로 만든 파일)
+python3 k8s-upgrade-skills/scripts/plan_check.py \
+  --planfile /path/to/terraform/cp.tfplan --step cp --target-version 1.34 \
+  --tf-dir /path/to/terraform --audit-log audit.log
+python3 k8s-upgrade-skills/scripts/apply_guard.py \
+  --planfile /path/to/terraform/cp.tfplan --step cp \
+  --cluster-name my-cluster --target-version 1.34 --audit-log audit.log
+
 # 인라인 드레인 모니터 — 메인 에이전트가 run_in_background로 실행 (sub-agent 아님)
 python3 k8s-upgrade-skills/scripts/drain_watch.py \
   --phase P4 --scope all --audit-log audit.log
@@ -83,6 +91,8 @@ k8s-upgrade-skills/          ← AI Agent가 읽는 스킬 디렉토리 (install
 │   ├── lib.py               ← 공통 헬퍼: GateResult, audit_flush, audit_append, kubectl_json, record, _parse_cpu/_parse_mem
 │   ├── gate_check.py        ← Phase 0: 18개 사전 검증 규칙 (COM/WLS/CAP/INF)
 │   ├── phase_gate.py        ← Phase 2~7: 각 Phase Gate 함수 (phase2~phase7 서브커맨드)
+│   ├── plan_check.py        ← saved Terraform plan JSON 허용 목록·목표 버전·AMI 검증
+│   ├── apply_guard.py       ← apply 직전 plan 해시·drain monitor·CP 상태 검증
 │   ├── drain_watch.py       ← 인라인 드레인 모니터 (백그라운드 폴링: 이벤트/PDB/NodeClaim → DRAIN-P*)
 │   ├── service_watch.py     ← 인라인 서비스 모니터 (EndpointSlice ready + HTTP health → SVC-P*)
 │   ├── audit_event.py       ← 단일 이벤트 audit.log 기록 CLI (lib.audit_append 래퍼)

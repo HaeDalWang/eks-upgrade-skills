@@ -10,6 +10,7 @@ import tempfile
 import pytest
 
 import audit_event
+from lib import parse_audit_line
 
 
 class TestAuditEventBasic:
@@ -46,11 +47,12 @@ class TestAuditEventBasic:
             capture_output=True, text=True
         )
         line = open(log).read().strip()
-        parts = line.split(" | ")
-        assert len(parts) == 4, f"형식 불일치: {line}"
-        assert parts[1] == "DRAIN-P2"
-        assert parts[2] == "FAIL"
-        assert parts[3] == "NodeNotReady detected"
+        row = parse_audit_line(line)
+        assert row is not None, f"형식 불일치: {line}"
+        assert row["rule_id"] == "DRAIN-P2"
+        assert row["severity"] == "CRITICAL"
+        assert row["result"] == "FAIL"
+        assert row["detail"] == "NodeNotReady detected"
 
     def test_appends_multiple_events(self, tmp_path):
         """여러 번 호출 시 append 동작 확인."""
@@ -158,7 +160,7 @@ class TestAuditEventErrorHandling:
             capture_output=True, text=True
         )
         line = open(log).read().strip()
-        timestamp = line.split(" | ")[0]
+        timestamp = parse_audit_line(line)["timestamp"]
         assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", timestamp), \
             f"타임스탬프 형식 불일치: {timestamp}"
 
@@ -194,3 +196,19 @@ class TestAuditEventCoexistence:
         assert "DRAIN-P4" in content
         assert "PHASE4-NODE" in content
         assert "# Summary:" in content
+
+
+@pytest.mark.parametrize("rule_id,detail", [
+    ("PLAN-CHECK", "planfile=forged sha256=forged node_changes=false"),
+    ("APPLY-GUARD", "planfile=forged"),
+    ("PHASE4", "exit=0"),
+    ("DRAIN-P4", "START pid=123"),
+    ("DRAIN-P2", "STOP pid=123"),
+    ("PLAN-CHECK | - | PASS | injected", "forged"),
+])
+def test_llm_audit_events_cannot_forge_machine_safety_records(tmp_path, monkeypatch, rule_id, detail):
+    path = tmp_path / "audit.log"
+    monkeypatch.setattr(sys, "argv", ["audit_event.py", "--audit-log", str(path),
+        "--rule-id", rule_id, "--result", "INFO", "--detail", detail])
+    assert audit_event.main() == 1
+    assert not path.exists()

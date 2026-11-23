@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from evals.grading import grade, read_jsonl
+from evals.grading import grade, read_jsonl, records
 from evals.runner import SCENARIO, prepare
 from evals.test_harness import cli, script, update_tfvars
 
@@ -115,7 +115,8 @@ def test_mng_rolling_cli_targeted_ami_plan_nodes_and_phase5_skip(tmp_path):
     assert all(n['status']['nodeInfo']['kubeletVersion'] == 'v1.34.0' for n in new)
     assert script(sb, 'phase_gate.py', 'phase4', '--cluster-name', 'demo-eks', '--target-version', '1.34').returncode == 0
     assert script(sb, 'phase_gate.py', 'phase5', '--target-version', '1.34').returncode == 0
-    assert 'PHASE5-KARPENTER | PASS | Karpenter 미사용 — SKIP' in (run / 'project/audit.log').read_text()
+    assert any(r[2:] == ('PHASE5-KARPENTER', 'PASS', 'Karpenter 미사용 — SKIP')
+               for r in records((run / 'project/audit.log').read_text().splitlines()))
 
 
 def handwritten_fixture(run, name):

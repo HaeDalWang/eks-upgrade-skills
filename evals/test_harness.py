@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from evals.grading import grade, read_jsonl
+from evals.grading import grade, read_jsonl, records
 from evals.runner import (INVALID, REPO, SCENARIO, accounting, answer, command,
                           guard, invoke, run_live)
 
@@ -89,7 +89,8 @@ def test_current_recipe_and_preflight_execute_without_shim_gaps(sandbox):
                     '--tf-dir', '.', '--audit-log', 'audit.log')
     assert result.returncode == 0, result.stdout + result.stderr
     audit = (sandbox[0] / 'project/audit.log').read_text()
-    assert 'COM-004 | PASS' in audit and '# Gate: OPEN' in audit
+    assert any(r[2:4] == ('COM-004', 'PASS') for r in records(audit.splitlines()))
+    assert '# Gate: OPEN' in audit
     assert not any('shim: unsupported' in c['stderr'] for c in read_jsonl(sandbox[0] / 'calls.jsonl'))
 
 

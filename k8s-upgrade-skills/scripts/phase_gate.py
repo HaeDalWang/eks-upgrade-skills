@@ -17,7 +17,9 @@ Usage:
   python3 scripts/phase_gate.py phase7 --cluster-name X --target-version Y [--audit-log FILE]
 """
 
-import argparse
+from functools import wraps
+from inspect import signature
+from pathlib import Path
 import json
 import re
 import shutil
@@ -31,7 +33,7 @@ from datetime import datetime, timezone
 try:
     from lib import (  # noqa: F401
         run_cmd, kubectl_json,
-        audit_init, audit_write, audit_flush, record, GateResult,
+        GateArgumentParser, audit_init, audit_write, audit_flush, audit_append, parse_audit_line, record, GateResult,
         RED, YELLOW, GREEN, CYAN, NC,
         SYSTEM_NS, ADDON_BAD_STATES,
         _gate, reset_gate,
@@ -53,6 +55,57 @@ POD_BLOCKING_SEC  = 300   # 생성 후 이 시간 초과 → BLOCKING (즉시 �
 FAILED_EVICT_WINDOW_SEC = 600  # 최근 10분 이내 이벤트만 유효
 
 
+def gate_next(exit_code: int, rows: list) -> str:
+    """Route every existing failure/warning using only this invocation's records.
+
+    Path                              NEXT action
+    phase2..7 FAIL                     STOP
+    phase3 Add-on UPDATING             RETRY
+    phase4 STALE Pod                   RUN delete-stale-pods <ns/pod ...>
+    phase4 TRANSIENT Pod               RETRY
+    phase7 sub-gate WARN               inherited action above; else ASK_USER
+
+    RUN emits only the fixed stale-Pod kind; no current gate requests a restart.
+    """
+    if exit_code == 1:
+        return "NEXT: STOP gate failed; resolve FAIL records before retrying"
+    warnings = [row for row in rows if row["result"] == "WARN"]
+    stale = [row for row in warnings if row["rule_id"] == "PHASE4-DATAPLANE"
+             and row["detail"].startswith("STALE Pod ")]
+    if stale:
+        pods = re.findall(r"(?:^|[ ,:])([a-z0-9.-]+/[a-z0-9.-]+)(?=[ ,—]|$)",
+                          stale[-1]["detail"])
+        if pods:
+            return "NEXT: RUN delete-stale-pods " + " ".join(pods)
+    if any(row["rule_id"] == "PHASE3-ADDON" or
+           row["detail"].startswith("TRANSIENT Pod ") for row in warnings):
+        return "NEXT: RETRY wait for UPDATING add-ons or transient Pods, then rerun gate"
+    return "NEXT: ASK_USER review WARN records; reply exactly 승인 to continue or 중단 to stop"
+
+
+def phase_boundary(number: int):
+    """Cover all returns without duplicating boundary and NEXT handling per branch."""
+    def decorate(fn):
+        @wraps(fn)
+        def checked(*args, **kwargs):
+            bound = signature(fn).bind(*args, **kwargs)
+            path = Path(bound.arguments["audit_log"])
+            offset = path.stat().st_size if path.exists() else 0
+            audit_append(str(path), f"PHASE{number}", "ENTER", fn.__name__)
+            rc = fn(*args, **kwargs)
+            result = {0: "PASS", 1: "FAIL", 2: "WARN"}[rc]
+            audit_append(str(path), f"PHASE{number}", result, f"exit={rc}")
+            if rc in (1, 2):
+                with path.open("rb") as stream:
+                    stream.seek(offset)
+                    rows = [row for line in stream.read().decode().splitlines()
+                            if (row := parse_audit_line(line))]
+                print(gate_next(rc, rows))
+            return rc
+        return checked
+    return decorate
+
+
 # ══════════════════════════════════════════════════════════════
 # CLI 도구 존재 확인
 # ══════════════════════════════════════════════════════════════
@@ -67,6 +120,7 @@ def check_tool_exists(tools: list) -> None:
 # ══════════════════════════════════════════════════════════════
 # Phase Gate 함수 (스텁 — 후속 태스크에서 구현)
 # ══════════════════════════════════════════════════════════════
+@phase_boundary(2)
 def gate_phase2(cluster_name: str, target_version: str, audit_log: str) -> int:
     """Phase 2: Control Plane 검증. 반환: exit code (0/1)."""
     reset_gate()
@@ -104,6 +158,7 @@ def gate_phase2(cluster_name: str, target_version: str, audit_log: str) -> int:
         return 1
 
 
+@phase_boundary(3)
 def gate_phase3(cluster_name: str, audit_log: str) -> int:
     """Phase 3: Add-on + kube-system Pod 검증. 반환: exit code (0/1)."""
     reset_gate()
@@ -375,6 +430,7 @@ def classify_pods(pods_json: dict, nodes_json: dict, now=None) -> PodClassificat
     return result
 
 
+@phase_boundary(4)
 def gate_phase4(cluster_name: str, target_version: str, audit_log: str) -> int:
     """Phase 4: 노드 버전 + FailedEvict + Pod 분류. 반환: exit code (0/1/2)."""
     reset_gate()
@@ -524,6 +580,7 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str) -> int:
     return exit_code
 
 
+@phase_boundary(5)
 def gate_phase5(target_version: str, audit_log: str) -> int:
     """Phase 5: Karpenter 노드 검증. 반환: exit code (0/1)."""
     reset_gate()
@@ -606,6 +663,7 @@ def _wrap_auth(cmd: list, auth_prefix: str) -> list:
     return shlex.split(auth_prefix) + cmd
 
 
+@phase_boundary(6)
 def gate_phase6(tf_dir: str, audit_log: str, auth_prefix: str = "", tf_var_file: str = "") -> int:
     """Phase 6: Terraform plan JSON 분석. 반환: exit code (0/1).
 
@@ -715,6 +773,7 @@ def gate_phase6(tf_dir: str, audit_log: str, auth_prefix: str = "", tf_var_file:
         tfplan_path.unlink(missing_ok=True)
 
 
+@phase_boundary(7)
 def gate_phase7(cluster_name: str, target_version: str, audit_log: str) -> int:
     """Phase 7: phase2+3+4 함수 호출 + Insights. 반환: exit code (0/1/2)."""
     import os
@@ -813,7 +872,7 @@ TOOL_DEPS: dict = {
 # main — argparse + 디스패치
 # ══════════════════════════════════════════════════════════════
 def main() -> None:
-    parser = argparse.ArgumentParser(
+    parser = GateArgumentParser(
         description="Phase 2~7 Gate 검증 (phase_gate.py)",
     )
     subparsers = parser.add_subparsers(dest="phase", required=True)
