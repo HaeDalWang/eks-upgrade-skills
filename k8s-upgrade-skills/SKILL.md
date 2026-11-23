@@ -86,28 +86,35 @@ auth error during a poll, re-authenticate and continue.
 
 ## Step loop
 
-After approval, set `PLAN_DOC` to the absolute approved `upgrade-plan.json` path and `TF_DIR` to the
-absolute discovery `tf_dir`. Then walk the step files in this order:
-
-| File | Phase | Gate | Plan step it applies |
-|---|---|---|---|
-| [steps/cp.md](steps/cp.md) | 1, 2 | `phase_gate.py phase2` | `cp` |
-| [steps/addons.md](steps/addons.md) | 3 | `phase_gate.py phase3` | `addon` (custom plans only) |
-| [steps/nodes.md](steps/nodes.md) | 4 | `phase_gate.py phase4` | `nodes` (MNG) |
-| [steps/karpenter.md](steps/karpenter.md) | 5 | `phase_gate.py phase5` | `karpenter` |
-| [steps/full.md](steps/full.md) | 6 | `phase_gate.py phase6` | `full` |
-| [steps/final.md](steps/final.md) | 7 | `phase_gate.py phase7` | — (writes the report) |
-
-In each file:
+After approval, set `PLAN_DOC` to the absolute approved plan path. Then repeat:
 
 1. Run `python3 scripts/upgrade_plan.py next --plan-doc "${PLAN_DOC}" --audit-log audit.log`.
-   It prints the current step (`id`, `type`, `targets`, `expect`) or `null` when every step is done.
-2. If the current step's `type` is the one this file applies, run the whole file with that step's
-   `id`, targets and expectations. Otherwise run only the parts the file marks "always" (its gate).
-   Never pick a different step type than `next` printed.
-3. Finish the step with `upgrade_plan.py done --step-id <id>` only where the file says, after its gate PASS.
+   It prints the current step (`id`, `type`, `targets`, `expect`), or `null` when every step is done.
+   Exit 2 `NEXT: ASK_USER` means the plan is not approved: go back to steps/start.md S-6.
+2. Run any gate-only file due now (table below), then open the file for the printed `type`:
 
-A custom approved `--order` moves its steps; keep the gate-only files at their default place.
+| `next` type | File | Phase | Gate |
+|---|---|---|---|
+| `cp` | [steps/cp.md](steps/cp.md) | 1, 2 | `phase_gate.py phase2` |
+| `addon` | [steps/addons.md](steps/addons.md) | 3 | `phase_gate.py phase3` |
+| `nodes` | [steps/nodes.md](steps/nodes.md) | 4 | `phase_gate.py phase4` |
+| `karpenter` | [steps/karpenter.md](steps/karpenter.md) | 5 | `phase_gate.py phase5` |
+| `full` | [steps/full.md](steps/full.md) | 6 | `phase_gate.py phase6` |
+| `null` | [steps/final.md](steps/final.md) | 7 | `phase_gate.py phase7` (writes the report) |
+
+3. Finish the step with `upgrade_plan.py done --step-id <id>` only where the file says, after its gate
+   PASS. Never pick a different step than `next` printed; an approved custom `--order` runs in its order.
+
+**Gate-only runs.** Phases 3, 4 and 5 gate every run, also when the plan has no step for them. Each
+gate-only run happens once, at the point below (the default-order position), and never runs `done`:
+
+| Gate-only file | When the plan has no | Run it right before the first step of type |
+|---|---|---|
+| steps/addons.md (3-1, 3-2) | `addon` step right after `cp` | `nodes`, `karpenter`, `full` |
+| steps/nodes.md (4-0, 4-0b, 4-6) | `nodes` step | `karpenter`, `full` |
+| steps/karpenter.md (5-2) | `karpenter` step | `full` |
+
+So the Phase 3 gate always runs right after the cp step's Phase 2 gate (or after that `addon` step).
 To skip the current step mid-run, ask the user (ASK_USER), then record it:
 `python3 scripts/upgrade_plan.py skip --plan-doc "${PLAN_DOC}" --audit-log audit.log --step-id <id> --answer <exact-word> --reason "<text>"`.
 Mid-run re-planning is refused once any apply or step record exists; use skip/ASK_USER instead.
@@ -118,10 +125,10 @@ Your memory of progress is not evidence. After any context compaction, session r
 
 1. run `python3 scripts/upgrade_plan.py next --plan-doc "${PLAN_DOC}" --audit-log audit.log`;
 2. read the last 40 lines of `audit.log` (last PHASE line, running monitors' `START`/`STOP`);
-3. reopen the step file for the current phase and continue from its first unfinished command.
+3. reopen the step file for the current phase and continue from its first unfinished command (each
+   step file re-derives its variables from `discovery.json`).
 
-If `PLAN_DOC` is unknown, find `upgrade-plan.json` in the working directory and its `PLAN-APPROVED`
-line in `audit.log`.
+If `PLAN_DOC` is unknown, take the last `PLAN-APPROVED` line's `plan_doc` in `audit.log`.
 
 ## Output language
 

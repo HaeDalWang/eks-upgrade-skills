@@ -4,7 +4,29 @@
 python3 scripts/upgrade_plan.py next --plan-doc "${PLAN_DOC}" --audit-log audit.log
 ```
 
-It must print `null` (every step done or skipped). A remaining step → open its step file first.
+It must print `null` (every step done or skipped). A remaining step → return to the SKILL.md step loop.
+
+Re-derive the discovery variables (also after compaction). `AUTH_PREFIX`, `TF_VAR_FILE` and `services`
+come from `recipe.md`; a `*_FILE` of `default` means the file the user named in the interview:
+
+```bash
+eval "$(python3 - <<'PY'
+import json, shlex
+d = json.load(open("discovery.json"))
+for name, path in [("CLUSTER_NAME", "cluster_name"), ("TARGET_VERSION", "target_version"),
+                   ("TF_DIR", "tf_dir"), ("EKS_MODULE", "module.address"),
+                   ("CLUSTER_VERSION_VAR", "cluster_version.variable"),
+                   ("CLUSTER_VERSION_FILE", "cluster_version.set_in"),
+                   ("MNG_AMI_VAR", "mng.ami_variable"), ("MNG_AMI_FILE", "mng.ami_variable_set_in"),
+                   ("KARPENTER_AMI_VAR", "karpenter.alias_variable"),
+                   ("KARPENTER_AMI_FILE", "karpenter.alias_variable_set_in")]:
+    value = d
+    for key in path.split("."):
+        value = value.get(key) if isinstance(value, dict) else None
+    print("{}={}".format(name, shlex.quote("" if value is None else str(value))))
+PY
+)"
+```
 
 ## 7-0. Refresh Fargate workloads (before the gate)
 
@@ -43,7 +65,7 @@ Write the report only after Phase 7 exit 0, or exit 2 with the user's recorded a
 python3 scripts/report.py --audit-log audit.log --plan-doc "${PLAN_DOC}"
 ```
 
-It writes `upgrade-report-<cluster>-<YYYYMMDD>.md` in the plan's language with every table taken from
+It writes `upgrade-report-<cluster>-<YYYYMMDD>.md` (never overwriting: `-2`, `-3`, ...) in the plan's language with every table taken from
 audit.log for this approved plan (phase timeline, plan steps, applies, monitor WARN/FAIL events,
 deviations, Phase 0 summary, overall result) and appends `REPORT | PASS`. Exit 1 `NEXT: STOP` →
 fix the named input (plan path, approval) and rerun; never write the tables yourself.

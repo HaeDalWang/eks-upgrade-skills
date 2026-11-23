@@ -231,20 +231,34 @@ def render(doc, path, scoped, rows, end, digest):
     return "\n".join(lines) + "\n", key, number, zone
 
 
+def write_new(path, content):
+    """Never overwrite: an existing report keeps its filled narrative, so add -2, -3, ..."""
+    candidate, number = path, 1
+    while True:
+        try:
+            with candidate.open("x", encoding="utf-8") as stream:
+                stream.write(content)
+            return candidate
+        except FileExistsError:
+            number += 1
+            candidate = path.with_name("{}-{}{}".format(path.stem, number, path.suffix))
+
+
 def main(argv=None):
     parser = GateArgumentParser(description="Write the upgrade report tables from audit.log")
     parser.add_argument("--audit-log", default="audit.log")
     parser.add_argument("--plan-doc", default="upgrade-plan.json")
-    parser.add_argument("--output", help="default: ./upgrade-report-<cluster>-<YYYYMMDD>.md")
+    parser.add_argument("--output", help="default: ./upgrade-report-<cluster>-<YYYYMMDD>[-FAILED].md; "
+                        "an existing file is never overwritten (-2, -3, ... suffix)")
     args = parser.parse_args(argv)
     try:
         path, doc, digest = load(args.plan_doc)
         rows = records(args.audit_log)
         start, end = scope(rows, path, digest)
         content, key, number, zone = render(doc, path, rows[start + 1:end], rows, end, digest)
-        output = Path(args.output or "upgrade-report-{}-{}.md".format(
-            doc["cluster"], datetime.now(zone).strftime("%Y%m%d"))).expanduser().resolve()
-        output.write_text(content, encoding="utf-8")
+        suffix = "" if key in ("success", "warn") else "-FAILED"
+        output = write_new(Path(args.output or "upgrade-report-{}-{}{}.md".format(
+            doc["cluster"], datetime.now(zone).strftime("%Y%m%d"), suffix)).expanduser().resolve(), content)
         audit_append(args.audit_log, "REPORT", "PASS", detail_fields(
             plan_doc=str(path), plan_sha256=digest, cluster_name=doc["cluster"],
             target_version=doc["target_version"], output=str(output), result=key, phase=number))

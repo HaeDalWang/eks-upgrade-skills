@@ -4,10 +4,32 @@
 python3 scripts/upgrade_plan.py next --plan-doc "${PLAN_DOC}" --audit-log audit.log
 ```
 
-The current step must be `full` (default id `full`); any other step → stop and recheck the plan.
+The current step must be `full` (default id `full`); any other step → return to the SKILL.md step loop.
 A full plan catches the drift the targeted steps left. AMI expectations come from the approved
 `full.expect`. A changed/unknown AMI without an expectation returns `NEXT: ASK_USER`: handle it with
 `skip`/ASK_USER (DEVIATION), because re-approval is refused mid-run. Never pass new expectations.
+
+Re-derive the discovery variables (also after compaction). `AUTH_PREFIX`, `TF_VAR_FILE` and `services`
+come from `recipe.md`; a `*_FILE` of `default` means the file the user named in the interview:
+
+```bash
+eval "$(python3 - <<'PY'
+import json, shlex
+d = json.load(open("discovery.json"))
+for name, path in [("CLUSTER_NAME", "cluster_name"), ("TARGET_VERSION", "target_version"),
+                   ("TF_DIR", "tf_dir"), ("EKS_MODULE", "module.address"),
+                   ("CLUSTER_VERSION_VAR", "cluster_version.variable"),
+                   ("CLUSTER_VERSION_FILE", "cluster_version.set_in"),
+                   ("MNG_AMI_VAR", "mng.ami_variable"), ("MNG_AMI_FILE", "mng.ami_variable_set_in"),
+                   ("KARPENTER_AMI_VAR", "karpenter.alias_variable"),
+                   ("KARPENTER_AMI_FILE", "karpenter.alias_variable_set_in")]:
+    value = d
+    for key in path.split("."):
+        value = value.get(key) if isinstance(value, dict) else None
+    print("{}={}".format(name, shlex.quote("" if value is None else str(value))))
+PY
+)"
+```
 
 ## 6-1. Full plan, monitor, guard and apply
 
@@ -52,4 +74,4 @@ falsely. After the apply and this gate PASS, finish the step:
 python3 scripts/upgrade_plan.py done --plan-doc "${PLAN_DOC}" --audit-log audit.log --step-id full
 ```
 
-Stop a monitor you restarted here. Open [final.md](final.md).
+Stop a monitor you restarted here. Return to the SKILL.md step loop (`next` prints `null` → final.md).

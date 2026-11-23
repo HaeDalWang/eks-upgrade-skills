@@ -108,3 +108,17 @@ def test_free_text_apostrophe_detail_does_not_break_plan_progression(tmp_path):
     audit_append(str(audit), "DRAIN-P2", "WARN", "pod doesn't evict")
     assert up.main(["next", "--plan-doc", str(path), "--audit-log", str(audit)]) == 0
     assert up.fields("pod doesn't evict") == {}
+
+
+def test_failed_run_gets_failed_name_and_reports_never_overwrite(tmp_path, monkeypatch):
+    path, audit = make_plan(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    phase(audit, 2, "FAIL")
+    assert report.main(["--plan-doc", str(path), "--audit-log", str(audit)]) == 0
+    first = next(tmp_path.glob("upgrade-report-demo-*-FAILED.md"))
+    first.write_text("filled narrative")
+    assert report.main(["--plan-doc", str(path), "--audit-log", str(audit)]) == 0
+    assert first.read_text() == "filled narrative"
+    second = first.with_name(first.stem + "-2.md")
+    assert "<!-- NARRATIVE:summary" in second.read_text()
+    assert up.fields(last_row(audit)["detail"])["output"] == str(second)

@@ -5,8 +5,30 @@ python3 scripts/upgrade_plan.py next --plan-doc "${PLAN_DOC}" --audit-log audit.
 ```
 
 Confirm the step id. Current `type` is `nodes` → run the whole file with its id (default `nodes`).
-Otherwise (no MNG in the plan) skip 4-1 → 4-4 and do not run `done`, but still run 4-0, 4-0b and
-**4-6, which always runs**.
+Otherwise this is the gate-only run (SKILL.md, no MNG in the plan): skip 4-1 → 4-4 and do not run
+`done`, but still run 4-0, 4-0b and **4-6, which always runs**.
+
+Re-derive the discovery variables (also after compaction). `AUTH_PREFIX`, `TF_VAR_FILE` and `services`
+come from `recipe.md`; a `*_FILE` of `default` means the file the user named in the interview:
+
+```bash
+eval "$(python3 - <<'PY'
+import json, shlex
+d = json.load(open("discovery.json"))
+for name, path in [("CLUSTER_NAME", "cluster_name"), ("TARGET_VERSION", "target_version"),
+                   ("TF_DIR", "tf_dir"), ("EKS_MODULE", "module.address"),
+                   ("CLUSTER_VERSION_VAR", "cluster_version.variable"),
+                   ("CLUSTER_VERSION_FILE", "cluster_version.set_in"),
+                   ("MNG_AMI_VAR", "mng.ami_variable"), ("MNG_AMI_FILE", "mng.ami_variable_set_in"),
+                   ("KARPENTER_AMI_VAR", "karpenter.alias_variable"),
+                   ("KARPENTER_AMI_FILE", "karpenter.alias_variable_set_in")]:
+    value = d
+    for key in path.split("."):
+        value = value.get(key) if isinstance(value, dict) else None
+    print("{}={}".format(name, shlex.quote("" if value is None else str(value))))
+PY
+)"
+```
 
 ## 4-0. Start the drain monitor (HARD GATE)
 
@@ -115,4 +137,4 @@ On PASS, finish the step only if the plan has a `nodes` step:
 python3 scripts/upgrade_plan.py done --plan-doc "${PLAN_DOC}" --audit-log audit.log --step-id nodes
 ```
 
-Stop the P4 monitors (KillShell, or `--stop-file`). Open [karpenter.md](karpenter.md).
+Stop the P4 monitors (KillShell, or `--stop-file`). Return to the SKILL.md step loop.

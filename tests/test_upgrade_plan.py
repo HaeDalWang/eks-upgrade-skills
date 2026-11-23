@@ -419,3 +419,36 @@ def test_f2_approve_requires_discovery_and_phase0_without_fail(tmp_path, capsys,
     assert invoke("approve", path, audit, "--answer", "승인") == code
     if code:
         assert capsys.readouterr().out.strip().splitlines()[-1].startswith("NEXT: STOP")
+
+
+def test_next_on_unapproved_plan_asks_for_approval_instead_of_printing_a_step(tmp_path, capsys):
+    path, audit = make_plan(tmp_path, approve=False)
+    assert invoke("next", path, audit) == 2
+    assert capsys.readouterr().out == "NEXT: ASK_USER plan not approved: show it and ask for approval\n"
+    assert invoke("next", tmp_path / "missing.json", audit) == 1
+    assert invoke("approve", path, audit, "--answer", "승인") == 0
+    capsys.readouterr()
+    assert invoke("next", path, audit) == 0
+    assert json.loads(capsys.readouterr().out)["id"] == "cp"
+
+
+def test_finished_plan_prints_null_and_next_hop_plans_in_same_dir_and_audit_log(tmp_path, capsys):
+    path, audit = make_plan(tmp_path)
+    for step in ("cp", "full"):
+        guard(path, audit, step)
+        assert invoke("done", path, audit, "--step-id", step) == 0
+    capsys.readouterr()
+    assert invoke("next", path, audit) == 0
+    assert capsys.readouterr().out == "null\n"
+    seed_preflight(audit, target="1.36")
+    hop = tmp_path / "upgrade-plan-1.36.json"
+    assert up.main(["create", "--plan-doc", str(hop), "--cluster-name", "demo", "--current-version", "1.35",
+                    "--target-version", "1.36", "--tf-dir", str(tmp_path), "--output-language", "ko"]) == 0
+    assert len(list(tmp_path.glob("upgrade-plan-demo-1.36-*.md"))) == 1
+    assert invoke("next", hop, audit) == 2
+    assert invoke("approve", hop, audit, "--answer", "승인") == 0
+    capsys.readouterr()
+    assert invoke("next", hop, audit) == 0
+    assert json.loads(capsys.readouterr().out)["id"] == "cp"
+    assert invoke("next", path, audit) == 0
+    assert capsys.readouterr().out == "null\n"

@@ -1,12 +1,20 @@
 # Start: discover, Phase 0, interview, recipe, plan, approval
 
+`TARGET_VERSION` here is the recipe `target_version` when `recipe.md` exists, else the version the
+user asked for (no target at all → no plan can exist yet: start at S-1).
+
 ```bash
-python3 scripts/upgrade_plan.py next --plan-doc upgrade-plan.json --audit-log audit.log
+python3 scripts/upgrade_plan.py next --plan-doc "upgrade-plan-${TARGET_VERSION}.json" --audit-log audit.log
 ```
 
-- Prints a step → a plan is already approved (resumed session). Do not re-plan; open the step file for
-  that step per the SKILL.md step loop.
-- Exit 1 (no plan or no approval yet) → continue below.
+- Prints a step → the plan is approved (resumed session). Do not re-plan; set `PLAN_DOC` to that
+  plan's absolute path and follow the SKILL.md step loop.
+- Exit 2 `NEXT: ASK_USER plan not approved` → the plan exists but was never approved: never execute.
+  Go to S-6 (show it again) and S-7 (approval).
+- Prints `null` → the run for this plan finished. For the next hop start at S-1 with the new target
+  (live Control Plane minor + 1); the recipe's old `target_version` no longer applies, and S-5 writes a
+  new `upgrade-plan-<new X.Y>.json` next to the old one in the same `audit.log`.
+- Exit 1 (no plan file) → continue at S-1.
 
 ## S-1. Discover (read-only)
 
@@ -138,7 +146,7 @@ missing service as WARN and drops it.
 
 ```bash
 python3 scripts/upgrade_plan.py create --discovery discovery.json \
-  --output-language ko --plan-doc upgrade-plan.json --audit-log audit.log
+  --output-language ko --plan-doc "upgrade-plan-${TARGET_VERSION}.json" --audit-log audit.log
 ```
 
 (`--output-language en` when the recipe says `en`.)
@@ -157,7 +165,7 @@ python3 scripts/upgrade_plan.py create --discovery discovery.json \
 
 ## S-6. Show the plan
 
-`upgrade-plan.json` is authoritative. Show the rendered `upgrade-plan-<cluster>-<YYYYMMDD>.md` in full,
+`upgrade-plan-<X.Y>.json` is authoritative. Show the rendered `upgrade-plan-<cluster>-<X.Y>-<YYYYMMDD>.md` in full,
 with the Phase 0 result, the recipe context and the services to watch. Then output:
 
 ```
@@ -178,7 +186,7 @@ with the Phase 0 result, the recipe context and the services to watch. Then outp
 Record the user's exact answer:
 
 ```bash
-python3 scripts/upgrade_plan.py approve --plan-doc upgrade-plan.json \
+python3 scripts/upgrade_plan.py approve --plan-doc "upgrade-plan-${TARGET_VERSION}.json" \
   --audit-log audit.log --answer "${USER_ANSWER}"
 ```
 
@@ -186,4 +194,4 @@ Only exit 0 authorizes execution: `PLAN-APPROVED | PASS` binds the absolute JSON
 Any other answer → exit 2 `NEXT: ASK_USER`. Editing the JSON needs fresh approval before execution;
 once any APPLY-GUARD/STEP-DONE/DEVIATION exists for the cluster+target, `approve` exits 1.
 
-Then set `PLAN_DOC` (absolute path) and open [cp.md](cp.md).
+Then set `PLAN_DOC` (absolute path) and follow the SKILL.md step loop.

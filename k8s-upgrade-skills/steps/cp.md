@@ -5,8 +5,29 @@ python3 scripts/upgrade_plan.py next --plan-doc "${PLAN_DOC}" --audit-log audit.
 ```
 
 Confirm the printed step `type` is `cp` and use its `id` below (default id `cp`). Take the targets
-from the step; `EKS_MODULE` is discovery `module.address`. Omit `-var-file` when the recipe has no
-`tf_var_file`.
+from the step. Omit `-var-file` when the recipe has no `tf_var_file`.
+
+Re-derive the discovery variables (also after compaction). `AUTH_PREFIX`, `TF_VAR_FILE` and `services`
+come from `recipe.md`; a `*_FILE` of `default` means the file the user named in the interview:
+
+```bash
+eval "$(python3 - <<'PY'
+import json, shlex
+d = json.load(open("discovery.json"))
+for name, path in [("CLUSTER_NAME", "cluster_name"), ("TARGET_VERSION", "target_version"),
+                   ("TF_DIR", "tf_dir"), ("EKS_MODULE", "module.address"),
+                   ("CLUSTER_VERSION_VAR", "cluster_version.variable"),
+                   ("CLUSTER_VERSION_FILE", "cluster_version.set_in"),
+                   ("MNG_AMI_VAR", "mng.ami_variable"), ("MNG_AMI_FILE", "mng.ami_variable_set_in"),
+                   ("KARPENTER_AMI_VAR", "karpenter.alias_variable"),
+                   ("KARPENTER_AMI_FILE", "karpenter.alias_variable_set_in")]:
+    value = d
+    for key in path.split("."):
+        value = value.get(key) if isinstance(value, dict) else None
+    print("{}={}".format(name, shlex.quote("" if value is None else str(value))))
+PY
+)"
+```
 
 ## 1-1. Update the cluster version variable only
 
@@ -153,5 +174,5 @@ After the apply, any resync/cleanup, and this gate's PASS (never before), finish
 python3 scripts/upgrade_plan.py done --plan-doc "${PLAN_DOC}" --audit-log audit.log --step-id cp
 ```
 
-Stop the P2 drain monitor (KillShell, or launch with `--stop-file <path>` and `touch` it). Open
-[addons.md](addons.md).
+Stop the P2 drain monitor (KillShell, or launch with `--stop-file <path>` and `touch` it). Return to
+the SKILL.md step loop: the Phase 3 run (addons.md) comes next.

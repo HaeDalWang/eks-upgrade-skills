@@ -12,6 +12,7 @@ from lib import GateArgumentParser, audit_append, parse_audit_line
 
 APPROVALS = {"ko": ("승인", "확인", "시작"), "en": ("approve", "confirm", "start")}
 POOLS = ("MNG", "Karpenter", "Fargate")
+NOT_APPROVED = "no PLAN-APPROVED for this path and JSON sha256"
 
 
 def detail_fields(**fields):
@@ -97,7 +98,7 @@ def context(path, audit_log, require_approval=True):
                  and row["result"] == "PASS" and fields(row["detail"]).get("plan_doc") == str(path)]
     approved = approvals and fields(rows[approvals[-1]]["detail"]).get("sha256") == digest
     if require_approval and not approved:
-        raise ValueError("no PLAN-APPROVED for this path and JSON sha256")
+        raise ValueError(NOT_APPROVED)
     scoped = []
     for row in rows[approvals[-1] + 1:] if approved else []:
         meta = fields(row["detail"])
@@ -283,7 +284,8 @@ def create(args):
                         deviations=[{"reason": args.reason}] if args.reason else []))
     path = Path(args.plan_doc).expanduser().resolve()
     zone = timezone(timedelta(hours=9)) if args.output_language == "ko" else timezone.utc
-    md = path.parent / "upgrade-plan-{}-{}.md".format(doc["cluster"], datetime.now(zone).strftime("%Y%m%d"))
+    md = path.parent / "upgrade-plan-{}-{}-{}.md".format(doc["cluster"], doc["target_version"],
+                                                         datetime.now(zone).strftime("%Y%m%d"))
     write_outputs(path, doc, md)
     print(str(path) + "\n" + str(md))
 
@@ -407,7 +409,13 @@ def main(argv=None):
         elif args.command in ("skip", "done"):
             code = advance(args)
         else:
-            _, step, _, _, _ = context(args.plan_doc, args.audit_log, require_approval=False)
+            try:
+                _, step, _, _, _ = context(args.plan_doc, args.audit_log)
+            except ValueError as error:
+                if str(error) != NOT_APPROVED:
+                    raise
+                # An unapproved plan has no current step: executing steps[0] would skip approval.
+                raise AskUser("plan not approved: show it and ask for approval")
             print(json.dumps(step, ensure_ascii=False))
             return 0
         if code == 2:

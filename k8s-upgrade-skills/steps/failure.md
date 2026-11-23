@@ -4,8 +4,9 @@
 python3 scripts/upgrade_plan.py next --plan-doc "${PLAN_DOC}" --audit-log audit.log
 ```
 
-Note the current step id: it is where the run stopped. Stop every background apply you started; leave
-running monitors until the report is written, then stop them.
+Note the current step id: it is where the run stopped. Never kill a running `terraform apply`: a killed
+apply leaves a stale state lock and partial state. Let it finish, then report. Stop only the inline
+monitors (`drain_watch.py` / `service_watch.py`), after the report is written.
 
 ## Which failure
 
@@ -23,8 +24,9 @@ running monitors until the report is written, then stop them.
    ```bash
    python3 scripts/report.py --audit-log audit.log --plan-doc "${PLAN_DOC}"
    ```
-   The result line shows where the run stopped (e.g. `❌ Phase 4에서 실패`). Exit 1 `NEXT: STOP` → fix the
-   named input and rerun.
+   It writes `upgrade-report-<cluster>-<YYYYMMDD>-FAILED.md` (never overwriting: an existing name gets
+   `-2`, `-3`, ...); the result line shows where the run stopped (e.g. `❌ Phase 4에서 실패`). Exit 1
+   `NEXT: STOP` → fix the named input and rerun.
 4. Fill the `<!-- NARRATIVE:... -->` slots (final.md 7-2). In `summary`, state the cluster's version
    state:
    - Phase 1 or before the cp apply: "업그레이드 미시작 — 클러스터 상태 변경 없음"
