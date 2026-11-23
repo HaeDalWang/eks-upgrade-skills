@@ -349,3 +349,12 @@ def test_f4_counted_or_for_each_eks_module_resources_are_matched(project, monkey
 def test_f4_a_module_with_a_longer_name_is_not_the_eks_module():
     assert discover.under("module.eks[0].aws_eks_cluster.this[0]", "module.eks")
     assert not discover.under("module.eks_other.aws_eks_cluster.this", "module.eks")
+
+
+def test_tf_cli_args_var_outranks_tfvars_file(tmp_path, monkeypatch):
+    (tmp_path / "terraform.tfvars").write_text('cluster_version = "1.33"\n')
+    monkeypatch.setenv("TF_CLI_ARGS_plan", "-var=cluster_version=1.34")
+    source, reason = discover.set_in({}, tmp_path, "cluster_version", None)
+    assert source == "unknown" and "TF_CLI_ARGS" in reason
+    (tmp_path / "dev.tfvars").write_text('cluster_version = "1.34"\n')
+    assert discover.set_in({}, tmp_path, "cluster_version", "dev.tfvars")[0] == str(tmp_path / "dev.tfvars")

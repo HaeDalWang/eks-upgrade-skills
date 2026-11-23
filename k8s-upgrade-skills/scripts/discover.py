@@ -216,6 +216,11 @@ def set_in(plan, tf_dir, name, var_file):
                   key=lambda p: p.name, reverse=True)
     files = ([tf_dir / var_file] if var_file else []) + auto + [
         tf_dir / "terraform.tfvars.json", tf_dir / "terraform.tfvars"]
+    # TF_CLI_ARGS* is inserted right after the subcommand, so its -var outranks every file except
+    # our own -var-file, which discovery appends after it.
+    cli_var = any("-var" in os.environ.get(key, "") for key in ("TF_CLI_ARGS", "TF_CLI_ARGS_plan"))
+    if cli_var and not (var_file and assigns(tf_dir / var_file, name)):
+        return "unknown", "TF_CLI_ARGS carries -var/-var-file that discovery cannot read"
     for path in files:
         if not path.is_file():
             continue
@@ -227,8 +232,6 @@ def set_in(plan, tf_dir, name, var_file):
     env = "TF_VAR_" + name
     if env in os.environ:
         return "env:" + env, ""
-    if any("-var" in os.environ.get(key, "") for key in ("TF_CLI_ARGS", "TF_CLI_ARGS_plan")):
-        return "unknown", "TF_CLI_ARGS carries -var/-var-file that discovery cannot read"
     declared = ((plan.get("configuration") or {}).get("root_module") or {}).get("variables") or {}
     if name in declared and "default" in (declared[name] or {}):
         if declared[name]["default"] == variable_value(plan, name):
