@@ -2,163 +2,137 @@
 name: k8s-upgrade-skills
 description: >
   Kubernetes version upgrade for Terraform-managed AWS EKS clusters.
-  Validates recipe, routes to the EKS/Terraform sub-skill, and enforces phase-gated safety.
+  Discovers the Terraform/EKS layout, interviews once, plans, and enforces phase-gated safety.
   Note: disruption-aware (detects risks proactively) but does not guarantee zero-downtime.
   Trigger keywords: 'K8s upgrade', 'EKS upgrade', 'Kubernetes version upgrade', 'K8s version upgrade',
   'upgrade EKS', 'upgrade Kubernetes', 'cluster upgrade'
 ---
 
-# Kubernetes Version Upgrade — Root Router
+# Kubernetes Version Upgrade
 
 This skill upgrades Terraform-managed AWS EKS clusters with workload protection.
-It collects upgrade requirements (from `recipe.md` if present, or interactively from the user), validates them, and routes to exactly ONE platform-specific sub-skill.
+It investigates the project and cluster read-only, runs the Phase 0 gate, asks the user once, writes `recipe.md`
+and the upgrade plan, and executes [aws/terraform-eks/SKILL.md](aws/terraform-eks/SKILL.md) after approval.
 
 All scripts referenced as `scripts/<name>.py` live in the **skill root directory** (this file's
 directory). Resolve them relative to that root, not to the user's working directory.
 
 ---
 
-## Step 1: Collect and Validate Recipe
+## Step 1: Investigate, Interview, Plan
 
-### 1-A: Check for existing recipe file
+Order is fixed: discover → Phase 0 gate → one interview message → recipe → plan → approval.
+Nothing changes infrastructure before `PLAN-APPROVED`.
 
-Look for recipe files in the project root or current working directory in this priority order:
+### 1-A: Discover (read-only)
 
-1. `recipe.md` (frontmatter format — preferred)
-2. `recipe.yaml`
+If `recipe.md` (preferred) or `recipe.yaml` exists in the working directory, validate it first
+(`python3 scripts/validate_recipe.py recipe.md`; exit 1 → report and stop) and reuse its answers
+as the previous answers: `target_version`, `tf_dir`, `auth_prefix`, `tf_var_file`, `services`,
+`output_language`, notes. Old routing fields (`iac`, `platform`, `environment`) are ignored.
 
-**If found**: skip to Step 1-C (validate).
+Always run discovery, also when a recipe exists (pass only the flags you have values for):
 
-**If not found**: proceed to Step 1-B (interactive collection).
-
----
-
-### 1-B: Interactive Collection (no recipe file)
-
-Ask the user for the following fields **in a single message** (do not ask one by one):
-
-```
-업그레이드할 클러스터 정보를 알려주세요:
-
-1. environment  : aws / on-prem
-2. platform     : eks / kubespray
-3. iac          : terraform / none
-4. cluster_name : 클러스터 이름
-5. current_version : 현재 버전 (예: "1.33")
-6. target_version  : 목표 버전 (예: "1.34")
-
-선택 항목:
-- output_language : ko / en (기본: ko)
-- auth_prefix  : terraform/aws 실행에 프리픽스가 필요하면 알려주세요 (예: "aws-runas my-profile"). 없으면 생략
-- tf_var_file  : terraform이 var-file을 요구하면 알려주세요 (예: "dev.tfvars"). 없으면 생략
-- 현재 상황이나 제약사항이 있으면 자유롭게 알려주세요 (없으면 생략)
+```bash
+python3 scripts/discover.py --root . --target-version "${TARGET_VERSION}" \
+  --tf-dir "${TF_DIR}" --auth-prefix "${AUTH_PREFIX}" --tf-var-file "${TF_VAR_FILE}" \
+  --output discovery.json --audit-log audit.log
 ```
 
-`auth_prefix` / `tf_var_file` are optional but **ask for them explicitly** — omitting them when the
-environment needs them makes the Phase 6 gate fail on auth/variable errors instead of real problems.
+It finds the Terraform root calling `terraform-aws-modules/eks`, runs a lock-free trial
+`terraform plan` + `show -json`, reads the cluster with aws/kubectl and the target AMI from
+public SSM, and writes `discovery.json` (module address, cluster version variable and the file
+that sets it, node pools, AMI variables with current/target values, service_watch candidates,
+`unknowns`). Without `--target-version` the target is the live Control Plane minor + 1.
 
-Once the user provides all required fields, generate `recipe.md` in the current working directory
-(include the optional keys only if the user supplied them):
+- exit 0 → everything settled.
+- exit 2 `NEXT: ASK_USER <fields>` → put each listed field in the interview (1-C). For
+  `auth_prefix` / `tf_var_file` / `terraform_init` / `tf_dir` / `cluster_name`, ask that one
+  question alone, then rerun discovery with the answer before continuing.
+- exit 1 `NEXT: STOP` → unsupported (no EKS module, plain `aws_eks_cluster`, several EKS
+  modules in one root) or plan failure. Report and stop.
+- exit 127 → missing CLI. Stop.
+
+Never fill an `unknown` yourself. Read every name (`module.address`, `cluster_version.variable`,
+`mng.ami_variable`, `karpenter.alias_variable`, ...) from `discovery.json`; do not assume names.
+
+### 1-B: Phase 0 gate (before approval)
+
+Run Phase 0 of [aws/terraform-eks/SKILL.md](aws/terraform-eks/SKILL.md) now, with
+`CLUSTER_NAME`, `CURRENT_VERSION`, `TARGET_VERSION`, `TF_DIR` from `discovery.json`.
+Exit 1 → show the Phase 0 remediation checklist and stop (no interview, no plan).
+Exit 2 → the HIGH/MEDIUM findings go into the interview (1-C) for confirmation.
+
+### 1-C: One interview message
+
+Ask everything in **one** message. Use the tool's choice UI if it has one, recommended answer
+first; otherwise numbered text with the recommended answer on each item. Ask only:
+
+1. each discovery `unknown` (with its reason) and each Phase 0 WARN finding;
+2. confirm `target_version` and the target AMI: `mng.target_release` and/or
+   `karpenter.target_alias` (recommended: the discovered public SSM value);
+3. confirm the service_watch candidates (`service_candidates`: name, namespace, via, ready pods,
+   PDB, suggested `min_endpoints`) — recommended: watch all listed; the user may drop or add;
+4. `output_language` only if no recipe sets it (recommended: `ko`).
+
+With a reused recipe, ask only what differs from it. An answer that does not settle an item
+(e.g. "알아서 해") takes the recommended answers you stated, and it is never plan approval.
+
+### 1-D: Write recipe
+
+Write the answers to `recipe.md` (overwrite: it is the answer record, not configuration) and
+validate it with `python3 scripts/validate_recipe.py recipe.md`:
 
 ```markdown
 ---
-environment: <value>
-platform: <value>
-iac: <value>
-cluster_name: <value>
-current_version: "<value>"
-target_version: "<value>"
+cluster_name: <discovery cluster_name>
+target_version: "<X.Y>"
 output_language: <ko|en>
+tf_dir: <discovery tf_dir>
+auth_prefix: "<only if used>"
+tf_var_file: <only if used>
+services:
+  - name: <svc>
+    namespace: <ns>
+    min_endpoints: <n>
 ---
 
 ## 업그레이드 컨텍스트
 
-<사용자가 제공한 상황/제약사항, 없으면 이 섹션 생략>
+<user notes; omit when none>
 ```
 
-Inform the user: `recipe.md를 생성했습니다. 다음 세션에서 재사용됩니다.`
+| Field | Required | Purpose |
+|---|---|---|
+| `cluster_name` | yes | Target for aws eks / kubectl commands |
+| `target_version` | yes | `"X.Y"`; only current minor + 1 (no skip, no downgrade) |
+| `output_language` | no (`ko`) | Language of user-facing output |
+| `tf_dir` | no | Confirmed Terraform root (discovery `tf_dir`) |
+| `auth_prefix` | no | Prefix for every `terraform`/`aws` call, e.g. `aws-runas my-profile`; pass as `--auth-prefix` to gates |
+| `tf_var_file` | no | `-var-file` for terraform plans; pass as `--tf-var-file` to gates |
+| `services` | no | service_watch targets: `name`, `namespace`, `min_endpoints`, optional `health_check_url`. Absent → service_watch skipped |
+| `notes` | no | `recipe.yaml` only; in `recipe.md` use the body |
 
----
-
-### 1-C: Validate Recipe
-
-Run schema validation (pass the actual file path found in Step 1-A):
+### 1-E: Generate the plan
 
 ```bash
-python3 scripts/validate_recipe.py recipe.md   # or recipe.yaml
+python3 scripts/upgrade_plan.py create --discovery discovery.json \
+  --output-language "${OUTPUT_LANGUAGE}" --plan-doc upgrade-plan.json
 ```
 
-If validation fails (exit code 1), report the specific error and do NOT proceed.
-
-### Required Fields
-
-| Field | Type | Allowed Values |
-|---|---|---|
-| `environment` | string | `aws`, `on-prem` |
-| `platform` | string | `eks`, `kubespray` |
-| `iac` | string | `terraform`, `none` |
-| `cluster_name` | string | non-empty cluster identifier |
-| `current_version` | string | e.g. `"1.34"` (quoted) |
-| `target_version` | string | e.g. `"1.35"` (quoted) |
-
-### Version Constraint
-
-- `gap == 1` → Proceed
-- `gap == 0` → "Already at target version. No upgrade needed."
-- `gap > 1` → "Version skip is NOT allowed. Upgrade one step at a time."
-- `gap < 0` → "Downgrade is not supported."
-
-### Optional Fields
-
-| Field | Default | Purpose |
-|---|---|---|
-| `output_language` | `ko` | Final report language. `ko` = Korean, `en` = English |
-| `notes` | (empty) | User-provided special instructions or constraints (`recipe.yaml`; in `recipe.md` use the body instead) |
-| `auth_prefix` | (empty) | Command prefix for every `terraform`/`aws` call, e.g. `aws-runas my-profile` for MFA assume-role setups |
-| `tf_var_file` | (empty) | `-var-file` passed to terraform, e.g. `dev.tfvars` for workspace-specific tfvars |
-| `services` | (absent) | Services to watch during node replacement. Each entry: `name`, `namespace`, `min_endpoints`, optional `health_check_url`. Absent → inline `service_watch` is skipped |
-
-> **`auth_prefix` / `tf_var_file` matter for gate correctness.** The Phase 6 gate runs `terraform`
-> *inside* the script, so it cannot inherit a shell prefix. If the environment needs either and the
-> recipe omits it, Phase 6 fails on an auth/variable error rather than on a real problem.
-
----
-
-## Step 1.5: Generate Upgrade Plan and Wait for Approval
-
-After recipe validation passes, generate the upgrade plan document before executing any phase.
-
-### 1.5-A: Generate Plan Document
-
-Generate the machine source and its Markdown rendering with `scripts/upgrade_plan.py create`.
-Use the cluster/version/tf-dir/language from the recipe and the observed node pools.
-Resolve and show the per-step Terraform targets and AMI expectations before approval; do not invent values.
-
-```bash
-python3 scripts/upgrade_plan.py create --cluster-name "${CLUSTER_NAME}" \
-  --current-version "${CURRENT_VERSION}" --target-version "${TARGET_VERSION}" \
-  --tf-dir "${TF_DIR}" --output-language "${OUTPUT_LANGUAGE}" \
-  --node-pool MNG --node-pool Karpenter --node-pool Fargate \
-  --target "cp=${EKS_MODULE}" \
-  --target "nodes=${EKS_MODULE}.module.eks_managed_node_group" \
-  --target "karpenter=${NODECLASS_ADDRESS}" \
-  --expect "nodes:${MNG_AMI_VAR}=${MNG_AMI}" \
-  --expect "nodes:release_version=${RESOLVED_RELEASE_VERSION}" \
-  --expect "karpenter:${KARPENTER_AMI_VAR}=${KARPENTER_AMI}" \
-  --expect "karpenter:alias=${KARPENTER_AMI}"
-```
-
-Include only present pools and their targets/expectations. Repeat `--expect STEP:NAME=VALUE`
-for each variable or resolved AMI (multiple `release_version` / `alias` values are allowed).
-Include expectations in `full` too when full sync may change those AMIs.
+Node pools, per-step targets and AMI expectations come from `discovery.json`. Explicit flags
+override it: `--target STEP=ADDRESS` / `--expect STEP:NAME=VALUE` replace that step's
+discovered values (use them for AMI values the user gave in the interview), `--node-pool`
+replaces the pools. Exit 2 `NEXT: ASK_USER` → a node step still lacks its AMI variable/value;
+ask, then rerun create with `--expect`.
 The default apply order is cp → nodes (MNG only) → karpenter (Karpenter only) → full.
 A custom `--order cp,addon,nodes,karpenter,full` requires `--reason "..."`; deviations appear in the rendering.
 `upgrade-plan.json` is authoritative; display the generated `upgrade-plan-<cluster>-<YYYYMMDD>.md`
-in full, together with recipe context and service-monitoring details.
+in full, together with the Phase 0 result, recipe context and service-monitoring details.
 Existing output files are never overwritten by create. For a revised plan, choose a new `--plan-doc` path
 in a separate output directory, display it and request approval again.
 
-### 1.5-B: Wait for Approval
+### 1-F: Wait for Approval
 
 After displaying the plan, output this message:
 
@@ -193,27 +167,10 @@ For an execution-time skip, ask the user and record `upgrade_plan.py skip --plan
 
 ---
 
-## Step 2: Route to Sub-Skill
+## Step 2: Execute
 
-Match the `(environment, platform, iac)` tuple against the routing table. Select exactly ONE sub-skill.
-
-| environment | platform | iac | Sub-Skill Path |
-|---|---|---|---|
-| `aws` | `eks` | `terraform` | [aws/terraform-eks/SKILL.md](aws/terraform-eks/SKILL.md) |
-| `on-prem` | `kubespray` | `none` | on-prem/kubespray/SKILL.md *(not implemented — planned)* |
-
-### Routing Rules
-
-1. **Exact match only**: All three fields must match a row in the table.
-2. **No mixing**: Execute ONLY the matched sub-skill.
-3. **No match**: Show the supported combinations table and suggest updating the recipe.
-4. **Single execution**: Only one sub-skill runs per invocation.
-
----
-
-## Step 3: Execute Sub-Skill
-
-Read the matched sub-skill file and follow its phases sequentially from Phase 0 onward.
+Read [aws/terraform-eks/SKILL.md](aws/terraform-eks/SKILL.md) and follow its phases sequentially from Phase 0 onward
+(Phase 0 already ran in Step 1-B; its section says when to rerun it). Every phase gate still runs.
 
 ### Universal Safety Rules (Non-negotiable)
 

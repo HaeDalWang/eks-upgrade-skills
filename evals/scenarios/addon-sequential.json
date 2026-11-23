@@ -32,7 +32,8 @@
       }
     }
   },
-  "recipe": "---\nenvironment: aws\nplatform: eks\niac: terraform\ncluster_name: demo-eks\ncurrent_version: \"1.33\"\ntarget_version: \"1.34\"\noutput_language: ko\n---\n\n## 업그레이드 컨텍스트\nKarpenter만 있고 MNG와 Fargate는 없습니다. 인증 프리픽스와 별도 var-file 없음. 현재 디렉토리가 Terraform 프로젝트. 서비스 감시 미설정.\n",
+  "target_ami": "bottlerocket@1.47.0",
+  "recipe": "---\ncluster_name: demo-eks\ntarget_version: \"1.34\"\noutput_language: ko\n---\n\n## 업그레이드 컨텍스트\n인증 프리픽스와 별도 var-file 없음. 서비스 감시 미설정.\n",
   "prompt": "설치된 k8s-upgrade-skills skill을 사용하여 현재 Terraform 프로젝트의 demo-eks를 1.33에서 1.34로 업그레이드해 주세요. recipe.md를 읽고 현재 skill 절차를 그대로 따르세요. 사용자에게 필요한 질문은 번호가 있는 텍스트로 물어보세요. 모든 작업과 최종 보고서 작성까지 끝났을 때 마지막 줄에 EVAL_DONE을 적으세요.",
   "answers": [
     {
@@ -48,9 +49,14 @@
       "approval": true
     },
     {
+      "id": "interview",
+      "when": "계획 생성 전 한 번의 인터뷰로 조사 결과 확인 항목(unknown, Phase 0 경고, 목표 버전·AMI, 서비스 감시 후보, 출력 언어)을 물을 때",
+      "answer_text": "추천안대로 진행합니다. 목표 버전 1.34, 목표 AMI는 조사한 공개 SSM 값 bottlerocket@1.47.0, 서비스 감시는 설정하지 않습니다, 출력 언어는 ko입니다."
+    },
+    {
       "id": "context",
-      "when": "인증이나 Terraform 경로, 구성 정보를 추가로 물을 때",
-      "answer_text": "현재 디렉토리가 TF_DIR입니다. auth_prefix와 tf_var_file은 없습니다. Karpenter만 있고 MNG와 Fargate는 없습니다."
+      "when": "인증 프리픽스, var-file, Terraform 경로만 따로 물을 때",
+      "answer_text": "현재 디렉토리가 TF_DIR입니다. auth_prefix와 tf_var_file은 없습니다."
     }
   ],
   "topology": {

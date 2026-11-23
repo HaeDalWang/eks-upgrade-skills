@@ -49,7 +49,7 @@ def main() -> int:
     # Only the owning deterministic scripts may assert machine safety evidence.
     if (not re.fullmatch(r"[A-Z0-9][A-Z0-9-]*", args.rule_id)
             or args.rule_id in {"PLAN-CHECK", "APPLY-GUARD", "PLAN-APPROVED",
-                                "STEP-DONE", "DEVIATION"}
+                                "STEP-DONE", "DEVIATION", "DISCOVERY"}
             or re.fullmatch(r"PHASE[0-9]+", args.rule_id)
             or (args.rule_id.startswith("DRAIN-")
                 and args.detail.split(" ", 1)[0] in {"START", "STOP"})):

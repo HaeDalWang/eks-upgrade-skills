@@ -62,6 +62,11 @@ def render(data, args):
     return json.dumps(value)
 
 
+def target_image(scenario):
+    """Public SSM value behind the scenario's target AMI (alias without its family)."""
+    return scenario['target_ami'].split('@')[-1]
+
+
 def aws(args, state, scenario):
     service, operation = args[:2]
     if (service, operation) == ('sts', 'get-caller-identity'):
@@ -70,7 +75,10 @@ def aws(args, state, scenario):
     if (service, operation) == ('ssm', 'get-parameters-by-path'):
         path = option(args, '--path', default='/aws/service/eks')
         return render({'Parameters': [{'Name': path + '/image_version',
-                                      'Value': '1.34.0-20261121' if scenario['topology']['mng'] else '1.47.0'}]}, args), 0
+                                      'Value': target_image(scenario)}]}, args), 0
+    if (service, operation) == ('ssm', 'get-parameter'):
+        return render({'Parameter': {'Name': option(args, '--name'),
+                                     'Value': target_image(scenario)}}, args), 0
     if (service, operation) == ('ec2', 'describe-subnets'):
         return render({'Subnets': [{'SubnetId': 'subnet-demo',
                                    'AvailableIpAddressCount': 128}]}, args), 0
@@ -216,7 +224,7 @@ def resources(kind, state):
         blocked = state.get('pdb_remaining', 0) > 0
         state['pdb_remaining'] = max(0, state.get('pdb_remaining', 0) - 1)
         return [{'kind': 'PodDisruptionBudget', 'metadata': {'name': 'web',
-            'namespace': 'default'}, 'status': {'disruptionsAllowed': 0 if blocked else 1, 'expectedPods': 2}}]
+            'namespace': 'default'}, 'spec': {'selector': {'matchLabels': {'app': 'web'}}}, 'status': {'disruptionsAllowed': 0 if blocked else 1, 'expectedPods': 2}}]
     if kind in ('crd', 'nodeclaims', 'nodepool', 'ec2nodeclasses') and not topology['karpenter']:
         return []
     if kind == 'crd':
@@ -249,6 +257,7 @@ def resources(kind, state):
 
 ALIASES = {'no': 'nodes', 'node': 'nodes', 'po': 'pods', 'pod': 'pods',
     'deploy': 'deployments', 'deployment': 'deployments', 'pdbs': 'pdb',
+    'poddisruptionbudgets': 'pdb', 'poddisruptionbudget': 'pdb',
     'persistentvolumes': 'pv', 'customresourcedefinitions': 'crd', 'crds': 'crd',
     'nodeclaim': 'nodeclaims', 'nodepools': 'nodepool', 'ec2nodeclass': 'ec2nodeclasses',
     'services': 'svc', 'service': 'svc', 'endpointslice': 'endpointslices',
@@ -422,7 +431,52 @@ def node_class(alias):
         'spec': {'amiSelectorTerms': [{'alias': alias}]}})}
 
 
-def plan(project, args, state):
+MNG_ADDRESS = 'module.eks.module.eks_managed_node_group["system-node"].aws_eks_node_group.this[0]'
+
+
+def configuration(topology):
+    """configuration block of example/terraform-eks as generalize_project shapes it."""
+    eks = {'kubernetes_version': {'references': ['var.eks_cluster_version']},
+           'eks_managed_node_groups': {'references': ['var.eks_node_ami_alias_al2023']}
+           if topology['mng'] else {'constant_value': {}}}
+    if topology['fargate']:
+        eks['fargate_profiles'] = {'constant_value': {'system': {
+            'selectors': [{'namespace': 'kube-system'}]}}}
+    calls = {'vpc': {'source': 'terraform-aws-modules/vpc/aws', 'version_constraint': '6.5.1',
+                     'expressions': {}, 'module': {}},
+             'eks': {'source': 'terraform-aws-modules/eks/aws', 'version_constraint': '21.10.1',
+                     'expressions': eks, 'module': {}}}
+    resources = []
+    if topology['karpenter']:
+        calls['karpenter'] = {'source': 'terraform-aws-modules/eks/aws//modules/karpenter',
+                              'version_constraint': '21.10.1', 'expressions': {}, 'module': {}}
+        resources.append({'address': 'kubectl_manifest.karpenter_default_node_class',
+                          'mode': 'managed', 'type': 'kubectl_manifest', 'name': 'karpenter_default_node_class',
+                          'expressions': {'yaml_body': {'references': ['var.eks_node_ami_alias_bottlerocket']}}})
+    return {'root_module': {'module_calls': calls, 'resources': resources}}
+
+
+def prior_state(state, scenario):
+    """Applied resources as terraform show -json reports them (current, not desired)."""
+    topology = state['topology']
+    resources = [{'address': 'kubectl_manifest.karpenter_default_node_class', 'type': 'kubectl_manifest',
+                  'values': node_class(state['ami_alias'])}] if topology['karpenter'] else []
+    eks = [{'address': 'module.eks.aws_eks_cluster.this[0]', 'type': 'aws_eks_cluster',
+            'values': {'name': scenario['cluster_name'], 'version': state['version']}}]
+    if topology['fargate']:
+        eks.append({'address': 'module.eks.module.fargate_profile["system"].aws_eks_fargate_profile.this[0]',
+                    'type': 'aws_eks_fargate_profile', 'values': {'fargate_profile_name': 'system'}})
+    children = [{'address': 'module.eks', 'resources': eks}]
+    if topology['mng']:
+        children[0]['child_modules'] = [{'address': 'module.eks.module.eks_managed_node_group["system-node"]',
+            'resources': [{'address': MNG_ADDRESS, 'type': 'aws_eks_node_group', 'values': {
+                'release_version': state['ami_alias'], 'ami_type': 'AL2023_x86_64_STANDARD',
+                'version': state['node_version']}}]}]
+    return {'format_version': '1.0', 'terraform_version': '1.13.0',
+            'values': {'root_module': {'resources': resources, 'child_modules': children}}}
+
+
+def plan(project, args, state, scenario):
     values = desired(project)
     changes = []
     targets = [v.split('=', 1)[1] for v in args if v.startswith('-target=')]
@@ -434,8 +488,7 @@ def plan(project, args, state):
     alias_key = 'eks_node_ami_alias_al2023' if state['topology']['mng'] else 'eks_node_ami_alias_bottlerocket'
     alias = values.get(alias_key, state['ami_alias'])
     if state['topology']['mng'] and alias != state['ami_alias'] and (not targets or any(t.startswith('module.eks') for t in targets)):
-        changes.append({'address': 'module.eks.module.eks_managed_node_group["system-node"].aws_eks_node_group.this[0]',
-            'type': 'aws_eks_node_group', 'change': {'actions': ['update'],
+        changes.append({'address': MNG_ADDRESS, 'type': 'aws_eks_node_group', 'change': {'actions': ['update'],
                 'before': {'release_version': state['ami_alias'], 'version': state['node_version']},
                 'after': {'release_version': alias, 'version': version}}})
     if state['topology']['karpenter'] and alias != state['ami_alias'] and (not targets or any('karpenter_default_node_class' in t for t in targets)):
@@ -448,7 +501,8 @@ def plan(project, args, state):
                        'after': {'name': 'demo-new'}}})
     return {'format_version': '1.2', 'terraform_version': '1.13.0',
             'variables': {key: {'value': value} for key, value in values.items()},
-            'resource_changes': changes}
+            'configuration': configuration(state['topology']),
+            'prior_state': prior_state(state, scenario), 'resource_changes': changes}
 
 
 def apply_changes(changes, state, scenario):
@@ -500,7 +554,7 @@ def terraform(args, state, scenario, project):
     if operation == 'init':
         return 'Terraform has been successfully initialized!', 0
     if operation == 'plan':
-        data = plan(project, args, state)
+        data = plan(project, args, state, scenario)
         out = option(args, '-out')
         if out:
             (project / out).write_text(json.dumps(data))
@@ -532,7 +586,7 @@ def terraform(args, state, scenario, project):
             state['last_error'] = cp_conflict()
             return '', 1
         paths = [v for v in args[1:] if not v.startswith('-')]
-        data = json.loads((project / paths[0]).read_text()) if paths else plan(project, args, state)
+        data = json.loads((project / paths[0]).read_text()) if paths else plan(project, args, state, scenario)
         state['last_plan'] = data
         changes = data['resource_changes']
         # Saved CP plans also become a no-op once EKS accepted the requested version.

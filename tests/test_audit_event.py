@@ -204,6 +204,7 @@ class TestAuditEventCoexistence:
     ("PLAN-APPROVED", "plan_doc=/x/upgrade-plan.json sha256=abc answer=승인"),
     ("STEP-DONE", "plan_doc=/x plan_sha256=abc step_id=cp step=cp"),
     ("DEVIATION", "plan_doc=/x plan_sha256=abc step_id=cp step=cp reason=x"),
+    ("DISCOVERY", "status=complete"),
     ("PHASE4", "exit=0"),
     ("DRAIN-P4", "START pid=123"),
     ("DRAIN-P2", "STOP pid=123"),

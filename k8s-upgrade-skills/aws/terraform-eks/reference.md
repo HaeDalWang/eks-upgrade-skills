@@ -381,9 +381,9 @@ Use when: Phase 7 gate exits with code 0.
 ## terraform.tfvars 변경 내용
 
 ```
-eks_cluster_version             = "{TARGET_VERSION}"
-eks_node_ami_alias_al2023       = "{NEW_VALUE}"    # {OLD_VALUE} → {NEW_VALUE}
-eks_node_ami_alias_bottlerocket = "{NEW_VALUE}"    # {OLD_VALUE} → {NEW_VALUE}
+{CLUSTER_VERSION_VAR} = "{TARGET_VERSION}"
+{MNG_AMI_VAR}         = "{NEW_VALUE}"    # {OLD_VALUE} → {NEW_VALUE}
+{KARPENTER_AMI_VAR}   = "{NEW_VALUE}"    # {OLD_VALUE} → {NEW_VALUE}
 ```
 ```
 

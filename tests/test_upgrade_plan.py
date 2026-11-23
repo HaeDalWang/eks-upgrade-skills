@@ -274,3 +274,62 @@ def test_planfile_scan_ignores_other_plan_bindings_in_cumulative_log(tmp_path, m
                      "--tf-dir", str(tmp_path), "--audit-log", str(audit)])
     last = up.records(audit)[-1]
     assert "different step_id" not in last["detail"]
+
+
+def discovery_file(tmp_path, **override):
+    found = {"schema_version": 1, "status": "complete", "cluster_name": "demo", "current_version": "1.34",
+             "target_version": "1.35", "tf_dir": str(tmp_path), "node_pools": ["MNG", "Karpenter"],
+             "module": {"address": "module.eks"},
+             "mng": {"present": True, "ami_variable": "mng_ami", "target_release": "1.35.0-20261121"},
+             "karpenter": {"present": True, "node_classes": ["kubectl_manifest.node_class"],
+                           "alias_variable": "node_alias", "target_alias": "bottlerocket@1.47.0"}}
+    found.update(override)
+    path = tmp_path / "discovery.json"
+    path.write_text(json.dumps(found))
+    return path
+
+
+def test_create_from_discovery_fills_pools_targets_and_ami_expectations(tmp_path):
+    path = tmp_path / "upgrade-plan.json"
+    assert up.main(["create", "--plan-doc", str(path), "--discovery", str(discovery_file(tmp_path)),
+                    "--output-language", "ko"]) == 0
+    doc = json.loads(path.read_text())
+    assert (doc["cluster"], doc["current_version"], doc["target_version"]) == ("demo", "1.34", "1.35")
+    assert doc["node_pools"] == ["MNG", "Karpenter"]
+    steps = {s["id"]: s for s in doc["steps"]}
+    assert list(steps) == ["cp", "nodes", "karpenter", "full"]
+    assert steps["cp"] == {"id": "cp", "type": "cp", "targets": ["module.eks"], "expect": {}}
+    assert steps["nodes"]["targets"] == ["module.eks.module.eks_managed_node_group"]
+    assert steps["nodes"]["expect"] == {"mng_ami": "1.35.0-20261121", "release_version": ["1.35.0-20261121"]}
+    assert steps["karpenter"]["expect"] == {"node_alias": "bottlerocket@1.47.0",
+                                            "alias": ["bottlerocket@1.47.0"]}
+    assert steps["full"]["expect"] == dict(steps["nodes"]["expect"], **steps["karpenter"]["expect"])
+
+
+def test_create_cli_flags_override_discovery(tmp_path):
+    path = tmp_path / "upgrade-plan.json"
+    assert up.main(["create", "--plan-doc", str(path), "--discovery", str(discovery_file(tmp_path)),
+                    "--output-language", "en", "--cluster-name", "other", "--node-pool", "Karpenter",
+                    "--expect", "karpenter:node_alias=bottlerocket@1.48.0",
+                    "--expect", "karpenter:alias=bottlerocket@1.48.0"]) == 0
+    doc = json.loads(path.read_text())
+    assert doc["cluster"] == "other" and doc["node_pools"] == ["Karpenter"]
+    assert doc["steps"][1]["expect"] == {"node_alias": "bottlerocket@1.48.0", "alias": ["bottlerocket@1.48.0"]}
+
+
+def test_create_from_discovery_with_unknown_ami_asks_user(tmp_path, capsys):
+    found = discovery_file(tmp_path, mng={"present": True, "ami_variable": None, "target_release": None})
+    path = tmp_path / "upgrade-plan.json"
+    assert up.main(["create", "--plan-doc", str(path), "--discovery", str(found),
+                    "--output-language", "ko"]) == 2
+    assert "NEXT: ASK_USER nodes step" in capsys.readouterr().out
+    assert not path.exists()
+
+
+def test_create_refuses_stopped_discovery_and_missing_values(tmp_path, capsys):
+    path = tmp_path / "upgrade-plan.json"
+    found = discovery_file(tmp_path, status="stop")
+    assert up.main(["create", "--plan-doc", str(path), "--discovery", str(found),
+                    "--output-language", "ko"]) == 1
+    assert up.main(["create", "--plan-doc", str(path), "--output-language", "ko"]) == 1
+    assert "--cluster-name is required" in capsys.readouterr().out

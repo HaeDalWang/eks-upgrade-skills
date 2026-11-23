@@ -18,17 +18,24 @@ All scripts are located in `./scripts/` relative to the skill root directory.
 
 ## Prerequisites
 
-Recipe values are already validated by the root skill router. Read these values directly:
+The root skill already ran `discover.py` (writes `discovery.json`), Phase 0, the interview and
+plan approval. Read these values directly; never assume Terraform names:
 
-| Variable | Recipe Field | Purpose |
+| Variable | Source | Purpose |
 |---|---|---|
-| `CLUSTER_NAME` | `cluster_name` | Target for aws eks / kubectl commands |
-| `CURRENT_VERSION` | `current_version` | Pre-flight validation |
-| `TARGET_VERSION` | `target_version` | Upgrade target |
-| `TF_DIR` | (auto-discover) | Directory containing `terraform.tfvars` or `*.tf` files |
-| `EKS_MODULE` | (auto-discover) | Terraform module name for EKS (e.g. `module.eks`) |
-| `AUTH_PREFIX` | `auth_prefix` (optional) | Command prefix for terraform/aws (e.g. `aws-runas my-profile`). Empty if absent |
-| `TF_VAR_FILE` | `tf_var_file` (optional) | `-var-file`/`--var-file` for terraform (e.g. `dev.tfvars`). Empty if absent |
+| `CLUSTER_NAME` | recipe `cluster_name` | Target for aws eks / kubectl commands |
+| `CURRENT_VERSION` | discovery `current_version` | Pre-flight validation |
+| `TARGET_VERSION` | recipe `target_version` | Upgrade target |
+| `TF_DIR` | discovery `tf_dir` | Terraform root calling the EKS module (absolute) |
+| `EKS_MODULE` | discovery `module.address` | EKS module address |
+| `CLUSTER_VERSION_VAR` / `CLUSTER_VERSION_FILE` | discovery `cluster_version.variable` / `.set_in` | Variable feeding the module's cluster version argument, and the tfvars file that sets it |
+| `MNG_AMI_VAR` / `MNG_AMI_FILE` | discovery `mng.ami_variable` / `.ami_variable_set_in` | Variable feeding MNG `release_version` (MNG only) |
+| `KARPENTER_AMI_VAR` / `KARPENTER_AMI_FILE` | discovery `karpenter.alias_variable` / `.alias_variable_set_in` | Variable feeding the EC2NodeClass alias (Karpenter only) |
+| `AUTH_PREFIX` | recipe `auth_prefix` (optional) | Command prefix for terraform/aws (e.g. `aws-runas my-profile`). Empty if absent |
+| `TF_VAR_FILE` | recipe `tf_var_file` (optional) | `-var-file`/`--var-file` for terraform (e.g. `dev.tfvars`). Empty if absent |
+
+A `*_FILE` value of `default` means no tfvars file sets the variable: ask the user which file to
+add it to (ASK_USER) instead of editing `variables.tf` defaults.
 
 > **Version constraint**: Only minor +1 upgrades are supported. 1.33 → 1.35 is rejected.
 
@@ -47,8 +54,8 @@ If `auth_prefix` is set in the recipe, **prefix every `terraform` and `aws` comm
 Print this plan to the user before starting:
 
 ```
-[Phase 0] Pre-flight Validation     → Gate: gate_check.py (18 rules, exit code)
-[Phase 1] Discovery & tfvars Update → Gate: grep verification
+[Phase 0] Pre-flight Validation     → Gate: gate_check.py (18 rules, exit code; ran before approval)
+[Phase 1] tfvars Update             → Gate: grep verification
 [Phase 2] Control Plane Upgrade     → Gate: phase_gate.py phase2 (exit code)
 [Phase 3] Add-on Safety Gate        → Gate: phase_gate.py phase3 (exit code)
 [Phase 4] Data Plane (MNG) Rolling  → Gate: phase_gate.py phase4 (exit code)
@@ -92,7 +99,10 @@ Use an absolute `TF_DIR`; keep script invocations and `audit.log` in the skill w
 
 ## Phase 0: Pre-flight Validation
 
-Run the deterministic gate check script. The script validates 18 rules and returns an exit code.
+Phase 0 already ran in root Step 1-B, before plan approval, with the discovered `TF_DIR`; its
+result was shown with the plan. Run it again here only when this `audit.log` has no Phase 0
+records for this cluster/target (e.g. a resumed session) or the user fixed a finding.
+The script validates 18 rules and returns an exit code.
 
 ```bash
 python3 scripts/gate_check.py \
@@ -163,54 +173,42 @@ Audit log (`audit.log`) is written by the script in **append mode** — each pha
 
 ---
 
-## Phase 1: Discovery & terraform.tfvars Update
+## Phase 1: Cluster Version Variable Update
 
-### 1-1. Auto-discover TF_DIR
-
-```bash
-find . -name 'terraform.tfvars' -o -name '*.tf' | head -20
-```
-
-Identify the directory containing both `terraform.tfvars` and EKS-related `*.tf` files.
-
-### 1-2. Auto-discover EKS Module Name
+### 1-1. Read Current Values
 
 ```bash
-grep -rE 'module\s+"[^"]*"' "${TF_DIR}"/*.tf | grep -iE 'eks|cluster'
+grep -nE "^[[:space:]]*${CLUSTER_VERSION_VAR}[[:space:]]*=" "${CLUSTER_VERSION_FILE}"
 ```
 
-### 1-3. Read Current Values
+Save the current value as `OLD_CLUSTER_VERSION` for audit recording.
+
+### 1-2. Update the Cluster Version Variable Only
+
+In `${CLUSTER_VERSION_FILE}`, set **only** `${CLUSTER_VERSION_VAR}` → `"${TARGET_VERSION}"`.
+**DO NOT update `${MNG_AMI_VAR}` / `${KARPENTER_AMI_VAR}` here** — AMI updates are deferred to
+Phase 4/5 to prevent nodes from rolling before the Control Plane is upgraded.
+
+### 1-3. Verify Update
 
 ```bash
-grep -E 'eks_cluster_version|eks_node_ami_alias' "${TF_DIR}/terraform.tfvars"
+grep -nE "^[[:space:]]*(${CLUSTER_VERSION_VAR}|${MNG_AMI_VAR}|${KARPENTER_AMI_VAR})[[:space:]]*=" \
+  "${CLUSTER_VERSION_FILE}"
 ```
 
-Save the current values as `OLD_CLUSTER_VERSION` and `OLD_AMI_*` for audit recording.
+(Leave out an AMI variable that discovery did not report.)
 
-### 1-4. Update eks_cluster_version Only
+**Gate**: `${CLUSTER_VERSION_VAR}` = TARGET_VERSION and the AMI variables are **unchanged**.
+Report before/after diff to user.
 
-Update **only** `eks_cluster_version` in `${TF_DIR}/terraform.tfvars`:
-- `eks_cluster_version` → `"${TARGET_VERSION}"`
-- **DO NOT update `eks_node_ami_alias_*` here** — AMI updates are deferred to Phase 4 to prevent MNG from rolling before the Control Plane is upgraded.
-
-### 1-5. Verify Update
-
-```bash
-grep -E 'eks_cluster_version' "${TF_DIR}/terraform.tfvars"
-```
-
-Confirm `eks_cluster_version` reflects `TARGET_VERSION`. Confirm `eks_node_ami_alias_*` is **unchanged**.
-
-**Gate**: `eks_cluster_version` = TARGET_VERSION. Report before/after diff to user.
-
-### 1-6. Record to audit.log
+### 1-4. Record to audit.log
 
 ```bash
 python3 scripts/audit_event.py \
   --audit-log audit.log \
   --rule-id "PHASE1-TFVARS" \
   --result "PASS" \
-  --detail "eks_cluster_version: ${OLD_CLUSTER_VERSION} → ${TARGET_VERSION} (AMI update deferred to Phase 4)"
+  --detail "${CLUSTER_VERSION_VAR}: ${OLD_CLUSTER_VERSION} → ${TARGET_VERSION} (AMI update deferred to Phase 4/5)"
 ```
 
 ---
@@ -230,8 +228,8 @@ Review the plan output:
 - `aws_eks_cluster` version change → Expected
 - `aws_eks_addon` version change → Expected
 - `time_sleep` replace → Expected
-- `aws_eks_node_group` version change (kubernetes version only, NOT release_version) → **Expected when using terraform-aws-eks module** — this means MNG rolling will be triggered simultaneously with CP upgrade. Verify `eks_node_ami_alias_*` was NOT modified in Phase 1 before proceeding.
-- `aws_eks_node_group` release_version / AMI change → **STOP**: `eks_node_ami_alias_*` was accidentally modified in Phase 1. Revert it before proceeding.
+- `aws_eks_node_group` version change (kubernetes version only, NOT release_version) → **Expected when using terraform-aws-eks module** — this means MNG rolling will be triggered simultaneously with CP upgrade. Verify the AMI variables (`MNG_AMI_VAR`/`KARPENTER_AMI_VAR`) were NOT modified in Phase 1 before proceeding.
+- `aws_eks_node_group` release_version / AMI change → **STOP**: an AMI variable was accidentally modified in Phase 1. Revert it before proceeding.
 - Any `-/+` (destroy-recreate) that is NOT `time_sleep` → follow **NEXT: ASK_USER**; obtain a fresh allowed plan and PASS before apply
 
 > **If `aws_eks_node_group` appears in the plan (version change):** MNG rolling will start alongside CP upgrade.
@@ -440,69 +438,22 @@ It polls each service's EndpointSlice ready count (vs `min_endpoints`) and HTTP 
 
 **Terminate after the Phase 4 gate passes**: KillShell, or use `--stop-file`.
 
-### 4-1. Detect Current amiType (Architecture Preservation)
+### 4-1. AMI Target (from discovery, Architecture Preserved)
 
-**CRITICAL**: Always read the current amiType before querying AMI versions. This preserves the existing architecture (x86_64 vs arm64) and prevents accidental RI waste.
+Discovery read each node group's amiType and resolved the target `release_version` for it from
+public SSM; the approved plan pins it in the `nodes` step (`${MNG_AMI_VAR}` and
+`release_version`). This preserves the existing architecture (x86_64 vs arm64).
+`CUSTOM` / `WINDOWS_*` amiTypes have no public SSM value; the user supplied it in the interview.
 
-```bash
-${AUTH_PREFIX} aws eks list-nodegroups --cluster-name "${CLUSTER_NAME}" --output json | \
-  jq -r '.nodegroups[]' | while read ng; do
-    ${AUTH_PREFIX} aws eks describe-nodegroup --cluster-name "${CLUSTER_NAME}" --nodegroup-name "$ng" \
-      --query '{name:nodegroup.nodegroupName, amiType:nodegroup.amiType}' --output json
-  done
-```
+### 4-2. Update the MNG AMI Variable (Data Plane Only)
 
-Determine the SSM path suffix based on amiType:
-
-| amiType | SSM path suffix |
-|---------|----------------|
-| `AL2023_x86_64_STANDARD` | `amazon-linux-2023/x86_64/standard` |
-| `AL2023_ARM_64_STANDARD` | `amazon-linux-2023/arm64/standard` |
-| `BOTTLEROCKET_x86_64` | `bottlerocket/aws-k8s-${TARGET_VERSION}/x86_64` |
-| `BOTTLEROCKET_ARM_64` | `bottlerocket/aws-k8s-${TARGET_VERSION}/arm64` |
-| `CUSTOM` / `WINDOWS_*` | Skip SSM query — user manages AMI manually |
-
-### 4-2. Update AMI Alias (Data Plane Only)
-
-Read the current AMI alias values:
+Read the current value, then set `${MNG_AMI_VAR}` in `${MNG_AMI_FILE}` to the approved value:
 
 ```bash
-grep -E 'eks_node_ami_alias' "${TF_DIR}/terraform.tfvars"
+grep -nE "^[[:space:]]*${MNG_AMI_VAR}[[:space:]]*=" "${MNG_AMI_FILE}"
 ```
 
-Query the latest AMI version for TARGET_VERSION from SSM using the amiType-derived path:
-
-```bash
-# Bottlerocket x86_64 (BOTTLEROCKET_x86_64)
-${AUTH_PREFIX} aws ssm get-parameters-by-path \
-  --path "/aws/service/bottlerocket/aws-k8s-${TARGET_VERSION}/x86_64/latest" \
-  --recursive \
-  --query "Parameters[?ends_with(Name, 'image_version')].Value" \
-  --output text
-
-# Bottlerocket arm64 (BOTTLEROCKET_ARM_64)
-${AUTH_PREFIX} aws ssm get-parameters-by-path \
-  --path "/aws/service/bottlerocket/aws-k8s-${TARGET_VERSION}/arm64/latest" \
-  --recursive \
-  --query "Parameters[?ends_with(Name, 'image_version')].Value" \
-  --output text
-
-# AL2023 x86_64 (AL2023_x86_64_STANDARD)
-${AUTH_PREFIX} aws ssm get-parameters-by-path \
-  --path "/aws/service/eks/optimized-ami/${TARGET_VERSION}/amazon-linux-2023/x86_64/standard" \
-  --recursive \
-  --query "Parameters[?ends_with(Name, 'image_version')].Value" \
-  --output text
-
-# AL2023 arm64 (AL2023_ARM_64_STANDARD)
-${AUTH_PREFIX} aws ssm get-parameters-by-path \
-  --path "/aws/service/eks/optimized-ami/${TARGET_VERSION}/amazon-linux-2023/arm64/standard" \
-  --recursive \
-  --query "Parameters[?ends_with(Name, 'image_version')].Value" \
-  --output text
-```
-
-Only query the path that matches the current amiType. Use the AMI variable names and expected
+Use the AMI variable names and expected
 values already recorded in the approved plan's `nodes.expect`; do not choose new expectations
 at check time. Update only the MNG variables for this step. Resolved `release_version` must be
 explicit and match its approved value; null/unknown AMIs fail. Karpenter AMI changes belong to
@@ -516,7 +467,7 @@ python3 scripts/audit_event.py \
   --audit-log audit.log \
   --rule-id "PHASE4-AMI" \
   --result "PASS" \
-  --detail "eks_node_ami_alias_bottlerocket: ${OLD_AMI} → ${NEW_AMI} (amiType=${AMI_TYPE})"
+  --detail "${MNG_AMI_VAR}: ${OLD_AMI} → ${NEW_AMI} (amiType=${AMI_TYPE})"
 ```
 
 ### 4-3. Targeted Plan for MNG
@@ -584,7 +535,7 @@ Proceed to Phase 5.
 
 ### 5-0. Start Drain Monitor (inline background)
 
-> ⛔ **HARD GATE**: Start the drain monitor and confirm it is running BEFORE updating `eks_node_ami_alias_*` in tfvars.
+> ⛔ **HARD GATE**: Start the drain monitor and confirm it is running BEFORE updating `${KARPENTER_AMI_VAR}` in tfvars.
 > AMI alias update triggers Karpenter drift detection and automatic node replacement immediately.
 > Do NOT modify tfvars until the monitor is active.
 >
@@ -604,7 +555,7 @@ It polls all-namespace Warning events, PDB status, AND NodeClaim Ready condition
 
 **Skip this step if `services` field is absent in recipe.md/recipe.yaml.**
 
-> ⛔ **HARD GATE**: If `services` is defined, start the service monitor and confirm it is running BEFORE updating `eks_node_ami_alias_*` in tfvars.
+> ⛔ **HARD GATE**: If `services` is defined, start the service monitor and confirm it is running BEFORE updating `${KARPENTER_AMI_VAR}` in tfvars.
 >
 > **Why inline, not a sub-agent**: see `../../docs/inline-monitors.md`.
 
@@ -620,7 +571,7 @@ It records `SVC-P5` entries to audit.log. **Terminate after the Phase 5 gate pas
 ### 5-1. Targeted Karpenter Plan and Apply
 
 If Karpenter is present, read the current `karpenter` step. With the monitors running,
-update only its approved AMI variables in tfvars. Use the EC2NodeClass address from the
+update only its approved AMI variable (`${KARPENTER_AMI_VAR}` in `${KARPENTER_AMI_FILE}`). Use the EC2NodeClass address from the
 step's targets as `NODECLASS_ADDRESS`; never include this change in the nodes plan.
 
 ```bash

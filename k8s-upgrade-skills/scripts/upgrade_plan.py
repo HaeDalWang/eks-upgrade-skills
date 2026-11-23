@@ -142,7 +142,63 @@ def render(doc):
     return "\n".join(lines)
 
 
+class AskUser(ValueError):
+    """create cannot fill a required value; the interview must supply it."""
+
+
+def discovery_defaults(args):
+    """Fill create arguments from discovery.json; explicit CLI values always win."""
+    found = json.loads(Path(args.discovery).expanduser().read_text(encoding="utf-8"))
+    if not isinstance(found, dict) or found.get("schema_version") != 1:
+        raise ValueError("unsupported discovery.json schema_version")
+    if found.get("status") == "stop":
+        raise ValueError("discovery stopped; rerun discover.py after fixing its STOP reason")
+    for name, key in (("cluster_name", "cluster_name"), ("current_version", "current_version"),
+                      ("target_version", "target_version"), ("tf_dir", "tf_dir")):
+        if not getattr(args, name):
+            setattr(args, name, found.get(key))
+    if not args.node_pool:
+        args.node_pool = list(found.get("node_pools") or [])
+    return found
+
+
+def discovery_steps(found):
+    """Per step type: (targets, expect) derived from discovery; None values are unknowns."""
+    module = (found.get("module") or {}).get("address")
+    mng, karpenter = found.get("mng") or {}, found.get("karpenter") or {}
+    nodes = {mng.get("ami_variable"): mng.get("target_release"),
+             "release_version": [mng.get("target_release")]} if mng.get("present") else {}
+    classes = {karpenter.get("alias_variable"): karpenter.get("target_alias"),
+               "alias": [karpenter.get("target_alias")]} if karpenter.get("present") else {}
+    return {"cp": ([module] if module else [], {}),
+            "nodes": ([module + ".module.eks_managed_node_group"] if module else [], nodes),
+            "karpenter": (list(karpenter.get("node_classes") or []), classes),
+            "full": ([], dict(nodes, **classes))}
+
+
+def apply_discovery(steps, found, args):
+    """Discovery fills steps the CLI left alone; a node step without AMI expectations asks."""
+    derived = discovery_steps(found)
+    cli_targets = {item.partition("=")[0] for item in args.target}
+    cli_expects = {item.partition(":")[0] for item in args.expect}
+    for step in steps:
+        targets, expect = derived.get(step["type"], ([], {}))
+        if step["id"] not in cli_targets:
+            step["targets"] = list(targets)
+        if step["id"] not in cli_expects:
+            step["expect"] = {k: v for k, v in expect.items() if k and v and v != [None]}
+        ami = {"nodes": "release_version", "karpenter": "alias"}.get(step["type"])
+        if ami and (not step["targets"] or not step["expect"].get(ami)
+                    or len(step["expect"]) < 2):
+            raise AskUser("{} step needs targets, the AMI variable and its target value "
+                          "(discovery left them unknown); pass --target/--expect".format(step["id"]))
+
+
 def create(args):
+    found = discovery_defaults(args) if args.discovery else None
+    for name in ("cluster_name", "current_version", "target_version", "tf_dir"):
+        if not nonempty(getattr(args, name)):
+            raise ValueError("--{} is required (or --discovery)".format(name.replace("_", "-")))
     pools = list(dict.fromkeys(args.node_pool))
     order = args.order.split(",") if args.order else default_order(pools)
     if len(order) != len(set(order)):
@@ -166,6 +222,8 @@ def create(args):
             raise ValueError("conflicting expected variable values")
         else:
             expected[name] = value
+    if found is not None:
+        apply_discovery(steps, found, args)
     doc = validate(dict(schema_version=1, cluster=args.cluster_name, current_version=args.current_version,
                         target_version=args.target_version, tf_dir=str(Path(args.tf_dir).expanduser().resolve()),
                         output_language=args.output_language, node_pools=pools, steps=steps,
@@ -252,8 +310,9 @@ def build_parser():
         if name == "skip":
             sub.add_argument("--reason", required=True)
         if name == "create":
+            sub.add_argument("--discovery", help="discovery.json from discover.py; CLI flags override it")
             for flag in ("cluster-name", "current-version", "target-version", "tf-dir"):
-                sub.add_argument("--" + flag, required=True)
+                sub.add_argument("--" + flag)
             sub.add_argument("--output-language", choices=APPROVALS, required=True)
             sub.add_argument("--node-pool", choices=POOLS, action="append", default=[])
             sub.add_argument("--target", action="append", default=[])
@@ -280,6 +339,9 @@ def main(argv=None):
         if code == 2:
             print("NEXT: ASK_USER exact approval word required")
         return code
+    except AskUser as error:
+        print("NEXT: ASK_USER {}".format(error))
+        return 2
     except (OSError, ValueError, TypeError, AttributeError) as error:
         print("NEXT: STOP {}".format(error))
         return 1

@@ -162,7 +162,7 @@ def grade(run):
     if scenario.get('safety_checks_version', 0) >= 2:
         safety_checks(check, calls, audit, users)
     if scenario.get('safety_checks_version', 0) >= 3:
-        plan_checks(check, run, audit)
+        plan_checks(check, run, audit, scenario, applies)
     missing = set(assertions) - result.keys()
     if missing:
         raise ValueError(f'unknown assertions: {sorted(missing)}')
