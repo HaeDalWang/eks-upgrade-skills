@@ -34,3 +34,6 @@ venv/
 # local
 .pouch/*
 .claude/settings.json
+
+# Opt-in eval artifacts (streams may include private session details)
+evals/runs/

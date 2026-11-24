@@ -1,14 +1,12 @@
 ---
 # ── 필수 필드 ──────────────────────────────────────────────
-environment: aws          # aws (고정)
-platform: eks             # eks (고정)
-iac: terraform            # terraform (고정)
 cluster_name: upgrade-skill
-current_version: "1.34"   # 따옴표 필수. 현재 클러스터 버전
-target_version: "1.35"    # 따옴표 필수. current_version의 차기 마이너 버전만 허용 (+1)
+target_version: "1.35"    # 따옴표 필수. 현재 Control Plane의 차기 마이너 버전만 허용 (+1)
+                          # 현재 버전은 discover.py가 라이브 클러스터에서 읽습니다
 
 # ── 선택 필드 ──────────────────────────────────────────────
 output_language: ko       # ko | en (기본: ko) — 계획서·보고서 출력 언어
+# tf_dir: /abs/path/to/terraform        # discover.py가 찾은 Terraform 루트. 없으면 생략
 # auth_prefix: "aws-runas my-profile"   # terraform/aws 명령 프리픽스 (MFA assume-role 등). 없으면 생략
 # tf_var_file: "dev.tfvars"         # terraform var-file (workspace별 tfvars). 없으면 생략
 
@@ -34,8 +32,8 @@ services:
 <!--
   recipe.md — EKS 업그레이드 요구사항 파일
 
-  이 파일을 EKS 프로젝트 루트에 배치하세요.
-  AI Agent가 이 파일을 읽고 업그레이드를 진행합니다.
+  이 파일을 EKS 프로젝트 루트에 배치하세요. 없으면 AI Agent가 탐색(discover.py)과
+  한 번의 질문으로 직접 만들고, 있으면 이전 답변으로 재사용합니다.
 
   검증: python3 k8s-upgrade-skills/scripts/validate_recipe.py recipe.md
 
@@ -46,7 +44,7 @@ services:
   이 파일은 두 부분으로 구성됩니다:
 
   1. frontmatter (--- 사이): 스크립트가 검증하는 구조화 필드
-     - 버전 건너뛰기 방지, 플랫폼 라우팅 등 안전 검증에 사용
+     - 버전 건너뛰기 방지 등 안전 검증에 사용
      - 반드시 정해진 형식을 지켜야 합니다
 
   2. body (--- 아래 이 섹션): LLM이 읽는 자유 형식 컨텍스트

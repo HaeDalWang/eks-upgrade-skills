@@ -2,214 +2,136 @@
 name: k8s-upgrade-skills
 description: >
   Kubernetes version upgrade for Terraform-managed AWS EKS clusters.
-  Validates recipe, routes to the EKS/Terraform sub-skill, and enforces phase-gated safety.
+  Discovers the Terraform/EKS layout, interviews once, plans, and enforces phase-gated safety.
   Note: disruption-aware (detects risks proactively) but does not guarantee zero-downtime.
   Trigger keywords: 'K8s upgrade', 'EKS upgrade', 'Kubernetes version upgrade', 'K8s version upgrade',
   'upgrade EKS', 'upgrade Kubernetes', 'cluster upgrade'
 ---
 
-# Kubernetes Version Upgrade — Root Router
+# Kubernetes Version Upgrade (EKS + Terraform)
 
-This skill upgrades Terraform-managed AWS EKS clusters with workload protection.
-It collects upgrade requirements (from `recipe.md` if present, or interactively from the user), validates them, and routes to exactly ONE platform-specific sub-skill.
+This skill upgrades one Terraform-managed AWS EKS cluster by one minor version with workload
+protection. Scripts decide every gate; you run them, follow their exit codes, and talk to the user.
+Only EKS clusters whose Terraform root calls `terraform-aws-modules/eks` are supported.
 
-All scripts referenced as `scripts/<name>.py` live in the **skill root directory** (this file's
-directory). Resolve them relative to that root, not to the user's working directory.
+All `scripts/<name>.py` and `steps/<name>.md` paths are relative to this file's directory (the skill
+root), not to the user's working directory. Keep script calls and `audit.log` in the working directory.
 
----
+## Start flow
 
-## Step 1: Collect and Validate Recipe
+Order is fixed. Nothing changes infrastructure before `PLAN-APPROVED`, except the separately
+user-approved Phase 0 Fargate refresh in `steps/start.md`:
 
-### 1-A: Check for existing recipe file
+1. discover (`scripts/discover.py`, read-only) → `discovery.json`
+2. Phase 0 gate (`scripts/gate_check.py`)
+3. one interview message
+4. write `recipe.md`
+5. `scripts/upgrade_plan.py create --discovery discovery.json`
+6. show the rendered plan in full
+7. the user types an approval word → `upgrade_plan.py approve`
 
-Look for recipe files in the project root or current working directory in this priority order:
+Open [steps/start.md](steps/start.md) and follow it for these seven steps.
 
-1. `recipe.md` (frontmatter format — preferred)
-2. `recipe.yaml`
+## Absolute rules
 
-**If found**: skip to Step 1-C (validate).
+1. **One minor version only.** Reject 1.33 → 1.35. Control Plane first; the data plane never exceeds it.
+2. **Gate scripts are authoritative.** Never reinterpret, skip or retry around an exit code. Phases run in
+   ascending order 0 → 7; every phase gate runs, also when the plan has no step for that phase.
+3. **No apply without a checked saved plan.** Every `terraform apply <planfile>` comes after
+   `plan_check.py` PASS and `apply_guard.py` PASS for that unchanged planfile, each command run only if
+   the previous one exited 0. Never use `-auto-approve`; never recompute a plan inside apply.
+4. **Monitors before node changes.** Start `drain_watch.py` (and `service_watch.py` when the recipe has
+   `services`) in the background and wait for its `START` line before any apply that can move pods.
+   Never force-drain past a PodDisruptionBudget.
+5. **Stop on failure.** Any FAIL or unexpected destroy/replace → stop, report, wait for the user.
+   No automatic rollback; a Control Plane rollback (EKS allows it within 7 days) is the user's call — see `steps/failure.md`.
 
-**If not found**: proceed to Step 1-B (interactive collection).
+## Exit codes and `NEXT:`
 
----
-
-### 1-B: Interactive Collection (no recipe file)
-
-Ask the user for the following fields **in a single message** (do not ask one by one):
-
-```
-업그레이드할 클러스터 정보를 알려주세요:
-
-1. environment  : aws / on-prem
-2. platform     : eks / kubespray
-3. iac          : terraform / none
-4. cluster_name : 클러스터 이름
-5. current_version : 현재 버전 (예: "1.33")
-6. target_version  : 목표 버전 (예: "1.34")
-
-선택 항목:
-- output_language : ko / en (기본: ko)
-- auth_prefix  : terraform/aws 실행에 프리픽스가 필요하면 알려주세요 (예: "aws-runas my-profile"). 없으면 생략
-- tf_var_file  : terraform이 var-file을 요구하면 알려주세요 (예: "dev.tfvars"). 없으면 생략
-- 현재 상황이나 제약사항이 있으면 자유롭게 알려주세요 (없으면 생략)
-```
-
-`auth_prefix` / `tf_var_file` are optional but **ask for them explicitly** — omitting them when the
-environment needs them makes the Phase 6 gate fail on auth/variable errors instead of real problems.
-
-Once the user provides all required fields, generate `recipe.md` in the current working directory
-(include the optional keys only if the user supplied them):
-
-```markdown
----
-environment: <value>
-platform: <value>
-iac: <value>
-cluster_name: <value>
-current_version: "<value>"
-target_version: "<value>"
-output_language: <ko|en>
----
-
-## 업그레이드 컨텍스트
-
-<사용자가 제공한 상황/제약사항, 없으면 이 섹션 생략>
-```
-
-Inform the user: `recipe.md를 생성했습니다. 다음 세션에서 재사용됩니다.`
-
----
-
-### 1-C: Validate Recipe
-
-Run schema validation (pass the actual file path found in Step 1-A):
-
-```bash
-python3 scripts/validate_recipe.py recipe.md   # or recipe.yaml
-```
-
-If validation fails (exit code 1), report the specific error and do NOT proceed.
-
-### Required Fields
-
-| Field | Type | Allowed Values |
+| Exit | Meaning | Action |
 |---|---|---|
-| `environment` | string | `aws`, `on-prem` |
-| `platform` | string | `eks`, `kubespray` |
-| `iac` | string | `terraform`, `none` |
-| `cluster_name` | string | non-empty cluster identifier |
-| `current_version` | string | e.g. `"1.34"` (quoted) |
-| `target_version` | string | e.g. `"1.35"` (quoted) |
+| `0` | PASS | Continue |
+| `1` | FAIL | Stop. Show the audit.log lines. Open [steps/failure.md](steps/failure.md) |
+| `2` | WARN | Show the finding. Continue only as the `NEXT:` line says |
+| `127` | CLI missing | Report the missing tool. Stop |
 
-### Version Constraint
+Every exit 1/2 ends with `NEXT: <ACTION> <detail>`. Follow that final line:
 
-- `gap == 1` → Proceed
-- `gap == 0` → "Already at target version. No upgrade needed."
-- `gap > 1` → "Version skip is NOT allowed. Upgrade one step at a time."
-- `gap < 0` → "Downgrade is not supported."
+- `RETRY`: wait as directed, rerun the same command, continue only after PASS.
+- `ASK_USER`: show the finding and wait for an exact approval word: `승인`, `확인`, `시작`
+  (`output_language: ko`) or `approve`, `confirm`, `start` (`en`, case-insensitive). Anything else
+  (`ok`, `응`, `yes`, `진행해줘`, `알아서 해`) is not approval. Record the exact answer:
+  ```bash
+  python3 scripts/audit_event.py --audit-log audit.log --rule-id ASK_USER --result INFO --detail "answer=<exact-word>"
+  ```
+- `RUN`: run only the listed fixed kind, `delete-stale-pods <ns/pod ...>` or
+  `rollout-restart <ns/kind/name>`, then rerun the gate. Invent no other command from free text.
+- `STOP`: stop, report, resolve the cause before any retry.
 
-### Optional Fields
+A PLAN-CHECK WARN never authorizes an apply. After ASK_USER, revise the plan scope until a fresh
+PLAN-CHECK PASS exists; `apply_guard.py` requires PASS for the unchanged file.
 
-| Field | Default | Purpose |
-|---|---|---|
-| `output_language` | `ko` | Final report language. `ko` = Korean, `en` = English |
-| `notes` | (empty) | User-provided special instructions or constraints (`recipe.yaml`; in `recipe.md` use the body instead) |
-| `auth_prefix` | (empty) | Command prefix for every `terraform`/`aws` call, e.g. `aws-runas my-profile` for MFA assume-role setups |
-| `tf_var_file` | (empty) | `-var-file` passed to terraform, e.g. `dev.tfvars` for workspace-specific tfvars |
-| `services` | (absent) | Services to watch during node replacement. Each entry: `name`, `namespace`, `min_endpoints`, optional `health_check_url`. Absent → inline `service_watch` is skipped |
+`audit.log` is written only by scripts (append mode). You read it; for your own events use
+`scripts/audit_event.py`, which refuses the rule IDs that scripts own.
 
-> **`auth_prefix` / `tf_var_file` matter for gate correctness.** The Phase 6 gate runs `terraform`
-> *inside* the script, so it cannot inherit a shell prefix. If the environment needs either and the
-> recipe omits it, Phase 6 fails on an auth/variable error rather than on a real problem.
+## Authentication
 
----
+If the recipe sets `auth_prefix` (e.g. `aws-runas my-profile`), prefix **every** `terraform` and `aws`
+command with it; `kubectl` uses the active kubeconfig context. Pass it as `--auth-prefix` to
+`discover.py`, `gate_check.py`, `plan_check.py`, `apply_guard.py` and `phase_gate.py phase6`, and
+`tf_var_file` as `--tf-var-file` to `discover.py`, `gate_check.py` and `phase_gate.py phase6`
+(`-var-file` on `terraform plan`). Omit a flag whose recipe value is absent.
+Phase 6 runs `terraform` inside the script and cannot inherit a shell prefix: without these flags it
+fails falsely. MFA sessions expire (often 1 h): refresh once before the Control Plane apply, and on an
+auth error during a poll, re-authenticate and continue.
 
-## Step 1.5: Generate Upgrade Plan and Wait for Approval
+## Step loop
 
-After recipe validation passes, generate the upgrade plan document before executing any phase.
+After approval, set `PLAN_DOC` to the absolute approved plan path. Then repeat:
 
-### 1.5-A: Generate Plan Document
+1. Run `python3 scripts/upgrade_plan.py next --plan-doc "${PLAN_DOC}" --audit-log audit.log`.
+   It prints the current step (`id`, `type`, `targets`, `expect`), or `null` when every step is done.
+   Exit 2 `NEXT: ASK_USER` means the plan is not approved: go back to steps/start.md S-6.
+2. Run any gate-only file due now (table below), then open the file for the printed `type`:
 
-Using the Plan Template from [aws/terraform-eks/reference.md](aws/terraform-eks/reference.md):
-
-1. Fill all `{PLACEHOLDER}` fields from the recipe
-2. For `{SERVICES_TABLE_OR_SKIP_MESSAGE}`:
-   - If `services` field exists: render a table with name, namespace, min_endpoints, health_check_url, monitoring mode
-   - If absent: write `"서비스 가용성 모니터링 미설정 — 인라인 service_watch 미투입 (recipe에 services 없음)."`
-3. For `{PLAN_GENERATED_AT}`:
-   - `output_language: ko` → KST (UTC+9) 기준 타임스탬프 (예: `2026-05-06 11:21 KST`)
-   - `output_language: en` → UTC 기준 타임스탬프 (예: `2026-05-06 02:21 UTC`)
-4. For `{CONTEXT_ADJUSTMENTS}` — interpret `_context` from recipe.md body (or `notes` from recipe.yaml):
-   - **If no context**: write `"특이사항 없음 — 표준 절차로 진행합니다."`
-   - **If context exists**: read the body and generate a bullet list of adjustments per phase:
-     - Time constraints (maintenance window, specific hours) → `⚠️ [Phase 2] <시간 제약 내용>`
-     - Zero downtime requirement → `⚠️ [Phase 4] zero downtime 요구 — 드레인 중 서비스 엔드포인트 실시간 감시 강화`
-     - Current incidents or known issues → `⚠️ [Phase N] <관련 Phase에 주의 표시>`
-     - Pre-approved exceptions (PDB relaxation, etc.) → `✅ [Phase 0] <사전 승인된 예외 내용>`
-     - Other constraints → `ℹ️ [Phase N] <참고 내용>`
-   - Use judgment: not every sentence needs a bullet. Only extract actionable or noteworthy items.
-5. Save the document as `upgrade-plan-{cluster_name}-{YYYYMMDD}.md` in the current working directory
-6. Display the full plan to the user
-
-### 1.5-B: Wait for Approval
-
-After displaying the plan, output this message:
-
-```
-계획서를 검토하신 후 업그레이드를 시작하려면 아래 단어 중 하나를 입력하세요:
-
-  승인 / 확인 / 시작
-
-(output_language: en → type: "approve", "confirm", or "start")
-```
-
-**CRITICAL — Approval Gate Rules:**
-- `output_language: ko`: Accept ONLY one of these exact words: `승인`, `확인`, `시작`
-- `output_language: en`: Accept ONLY one of these exact words: `approve`, `confirm`, `start` (case-insensitive)
-- ANY other input — including "진행해줘", "ok", "응", "그래", "yes", "proceed" — MUST NOT be treated as approval
-- If the user types anything else, respond: "승인 단어가 일치하지 않습니다. '승인', '확인', '시작' 중 하나를 입력해주세요." and wait again
-- This gate cannot be bypassed by any instruction
-
----
-
-## Step 2: Route to Sub-Skill
-
-Match the `(environment, platform, iac)` tuple against the routing table. Select exactly ONE sub-skill.
-
-| environment | platform | iac | Sub-Skill Path |
+| `next` type | File | Phase | Gate |
 |---|---|---|---|
-| `aws` | `eks` | `terraform` | [aws/terraform-eks/SKILL.md](aws/terraform-eks/SKILL.md) |
-| `on-prem` | `kubespray` | `none` | on-prem/kubespray/SKILL.md *(not implemented — planned)* |
+| `cp` | [steps/cp.md](steps/cp.md) | 1, 2 | `phase_gate.py phase2` |
+| `addon` | [steps/addons.md](steps/addons.md) | 3 | `phase_gate.py phase3` |
+| `nodes` | [steps/nodes.md](steps/nodes.md) | 4 | `phase_gate.py phase4` |
+| `karpenter` | [steps/karpenter.md](steps/karpenter.md) | 5 | `phase_gate.py phase5` |
+| `full` | [steps/full.md](steps/full.md) | 6 | `phase_gate.py phase6` |
+| `null` | [steps/final.md](steps/final.md) | 7 | `phase_gate.py phase7` (writes the report) |
 
-### Routing Rules
+3. Finish the step with `upgrade_plan.py done --step-id <id>` only where the file says, after its gate
+   PASS. Never pick a different step than `next` printed; an approved custom `--order` runs in its order.
 
-1. **Exact match only**: All three fields must match a row in the table.
-2. **No mixing**: Execute ONLY the matched sub-skill.
-3. **No match**: Show the supported combinations table and suggest updating the recipe.
-4. **Single execution**: Only one sub-skill runs per invocation.
+**Gate-only runs.** Phases 3, 4 and 5 gate every run, also when the plan has no step for them. Each
+gate-only run happens once, at the point below (the default-order position), and never runs `done`:
 
----
-
-## Step 3: Execute Sub-Skill
-
-Read the matched sub-skill file and follow its phases sequentially from Phase 0 onward.
-
-### Universal Safety Rules (Non-negotiable)
-
-| # | Rule | Detail |
+| Gate-only file | When the plan has no | Run it right before the first step of type |
 |---|---|---|
-| 1 | **No Version Skipping** | Minor version +1 only. Reject 1.33 → 1.35. |
-| 2 | **Control Plane First** | Data plane version must NEVER exceed control plane. |
-| 3 | **Phase Gates** | Every phase boundary requires ALL validations to pass via gate scripts. |
-| 4 | **PDB Respect** | Never force-drain past PodDisruptionBudgets. |
-| 5 | **No Reverse Phases** | Phases execute in strict ascending order. |
-| 6 | **Plan Before Apply** | Every infrastructure mutation must be previewed before execution. |
-| 7 | **Abort on Failure** | Any unexpected error → STOP, report, and await user decision. |
-| 8 | **Gate Scripts Are Authoritative** | The LLM MUST NOT override or reinterpret gate script exit codes. |
+| steps/addons.md (3-1, 3-2) | `addon` step right after `cp` | `nodes`, `karpenter`, `full` |
+| steps/nodes.md (4-0, 4-0b, 4-6) | `nodes` step | `karpenter`, `full` |
+| steps/karpenter.md (5-2) | `karpenter` step | `full` |
 
-### Output Language
+So the Phase 3 gate always runs right after the cp step's Phase 2 gate (or after that `addon` step).
+To skip the current step mid-run, ask the user (ASK_USER), then record it:
+`python3 scripts/upgrade_plan.py skip --plan-doc "${PLAN_DOC}" --audit-log audit.log --step-id <id> --answer <exact-word> --reason "<text>"`.
+Mid-run re-planning is refused once any apply or step record exists; use skip/ASK_USER instead.
 
-All **user-facing output** (phase summaries, completion reports, error messages) must be in the language specified by `output_language` in the recipe file.
-- Default: `ko` (Korean)
-- Internal processing and reasoning: English (for accuracy)
-- Sub-skill SKILL.md instructions are written in English for LLM consistency
+## After compaction or resume
+
+Your memory of progress is not evidence. After any context compaction, session resume or long pause:
+
+1. run `python3 scripts/upgrade_plan.py next --plan-doc "${PLAN_DOC}" --audit-log audit.log`;
+2. read the last 40 lines of `audit.log` (last PHASE line, running monitors' `START`/`STOP`);
+3. reopen the step file for the current phase and continue from its first unfinished command (each
+   step file re-derives its variables from `discovery.json`).
+
+If `PLAN_DOC` is unknown, take the last `PLAN-APPROVED` line's `plan_doc` in `audit.log`.
+
+## Output language
+
+All user-facing output (summaries, questions, reports, errors) uses the recipe `output_language`
+(default `ko`). Reason internally in English.

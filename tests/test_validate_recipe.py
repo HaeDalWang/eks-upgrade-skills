@@ -432,3 +432,45 @@ target_version: "1.35"
         )
         assert r.returncode == 1
         assert "건너뛰기" in r.stdout
+
+
+# ══════════════════════════════════════════════════════════════
+# discover.py 이후 recipe: environment/platform/iac 폐기
+# ══════════════════════════════════════════════════════════════
+
+NEW_RECIPE = """\
+cluster_name: my-cluster
+target_version: "1.34"
+output_language: ko
+tf_dir: /work/infra/eks
+"""
+
+
+class TestDeprecatedPlatformFields:
+
+    def _cli(self, path):
+        return subprocess.run(
+            [sys.executable, "k8s-upgrade-skills/scripts/validate_recipe.py", path],
+            capture_output=True, text=True)
+
+    def test_old_recipe_with_environment_platform_iac_still_validates_with_note(self, tmp_path):
+        r = self._cli(_write_recipe(tmp_path, VALID_BASE))
+        assert r.returncode == 0, r.stdout
+        assert "더 이상 쓰지 않는 필드 무시: environment, platform, iac" in r.stdout
+
+    def test_unsupported_old_combo_is_ignored_not_rejected(self):
+        recipe = validate_recipe.parse_simple_yaml(
+            VALID_BASE.replace("environment: aws", "environment: on-prem"))
+        assert validate_recipe.validate(recipe) == []
+
+    def test_new_recipe_without_platform_fields_or_current_version_validates(self, tmp_path):
+        r = self._cli(_write_recipe(tmp_path, NEW_RECIPE))
+        assert r.returncode == 0, r.stdout
+        assert "더 이상 쓰지 않는" not in r.stdout
+        assert "tf_dir: /work/infra/eks" in r.stdout
+
+    def test_optional_current_version_still_checks_gap_and_format(self):
+        skip = validate_recipe.parse_simple_yaml(NEW_RECIPE + 'current_version: "1.32"\n')
+        assert any("건너뛰기" in e for e in validate_recipe.validate(skip))
+        bad = validate_recipe.parse_simple_yaml(NEW_RECIPE + 'current_version: "1.x"\n')
+        assert any("형식 오류" in e for e in validate_recipe.validate(bad))

@@ -17,13 +17,12 @@ from pathlib import Path
 
 # ── 스키마 정의 ──────────────────────────────────────────────
 REQUIRED_FIELDS = {
-    "environment": {"type": str, "allowed": ["aws", "on-prem"]},
-    "platform":    {"type": str, "allowed": ["eks", "kubespray"]},
-    "iac":         {"type": str, "allowed": ["terraform", "none"]},
     "cluster_name": {"type": str},
-    "current_version": {"type": str, "pattern": r"^\d+\.\d+$"},
     "target_version":  {"type": str, "pattern": r"^\d+\.\d+$"},
 }
+
+# discover.py가 플랫폼/IaC를 판별하므로 recipe에서는 더 쓰지 않는다 (있으면 무시 + 안내)
+DEPRECATED_FIELDS = ("environment", "platform", "iac")
 
 OPTIONAL_FIELDS = {
     "output_language": {"type": str, "allowed": ["ko", "en"], "default": "ko"},
@@ -31,18 +30,14 @@ OPTIONAL_FIELDS = {
     # 인증/terraform 컨텍스트 — LLM 즉석 탐색을 줄이기 위해 recipe에 명시
     "auth_prefix":     {"type": str, "default": ""},   # 예: "aws-runas my-profile"
     "tf_var_file":     {"type": str, "default": ""},   # 예: "dev.tfvars"
+    "tf_dir":          {"type": str, "default": ""},   # discover.py가 찾고 사용자가 확인한 경로
+    # 현재 버전은 discover.py가 라이브 CP에서 읽는다. 적혀 있으면 버전 차이만 검증
+    "current_version": {"type": str, "pattern": r"^\d+\.\d+$", "default": ""},
 }
 
 # services 항목 스키마
 _SERVICE_REQUIRED = {"name", "namespace", "min_endpoints"}
 _SERVICE_OPTIONAL = {"health_check_url"}
-
-# ── 지원 플랫폼 조합 ────────────────────────────────────────
-SUPPORTED_COMBOS = [
-    ("aws", "eks", "terraform"),
-    # ("on-prem", "kubespray", "none"),  # 계획됨
-]
-
 
 # ── YAML 파싱 (PyYAML 없이 순수 파이썬) ─────────────────────
 def parse_simple_yaml(text: str) -> dict:
@@ -299,20 +294,7 @@ def validate(recipe: dict) -> list[str]:
             errors.append(
                 f"다운그레이드 불가: {cv} → {tv}")
 
-    # 3. 플랫폼 조합 검증
-    env = recipe.get("environment", "")
-    plat = recipe.get("platform", "")
-    iac = recipe.get("iac", "")
-    if env and plat and iac:
-        combo = (env, plat, iac)
-        if combo not in SUPPORTED_COMBOS:
-            supported_str = ", ".join(
-                f"({e}, {p}, {i})" for e, p, i in SUPPORTED_COMBOS)
-            errors.append(
-                f"미지원 조합: ({env}, {plat}, {iac}) — "
-                f"지원: {supported_str}")
-
-    # 4. 선택 필드 허용 값 확인
+    # 3. 선택 필드 허용 값 / 형식 확인
     for field, schema in OPTIONAL_FIELDS.items():
         if field in recipe and recipe[field]:
             value = recipe[field]
@@ -320,13 +302,21 @@ def validate(recipe: dict) -> list[str]:
                 errors.append(
                     f"'{field}': 허용되지 않는 값 '{value}' — "
                     f"허용: {schema['allowed']}")
+            if "pattern" in schema and not re.match(schema["pattern"], value):
+                errors.append(
+                    f"'{field}': 형식 오류 '{value}' — "
+                    f"기대 패턴: {schema['pattern']} (예: \"1.34\")")
 
-    # 5. services 필드 검증 (선택)
+    # 4. services 필드 검증 (선택)
     services = recipe.get("_services", [])
     if services:
         errors.extend(validate_services(services))
 
     return errors
+
+
+def deprecated_fields(recipe: dict) -> list[str]:
+    return [field for field in DEPRECATED_FIELDS if field in recipe]
 
 
 # ── main ─────────────────────────────────────────────────────
@@ -367,6 +357,10 @@ def main() -> None:
         preview = context[:80].replace("\n", " ")
         print(f"   context: {preview}{'...' if len(context) > 80 else ''}")
     print()
+    deprecated = deprecated_fields(recipe)
+    if deprecated:
+        print(f"ℹ️  더 이상 쓰지 않는 필드 무시: {', '.join(deprecated)} "
+              f"— 플랫폼/IaC는 discover.py가 판별합니다. recipe에서 지워도 됩니다.")
 
     errors = validate(recipe)
 

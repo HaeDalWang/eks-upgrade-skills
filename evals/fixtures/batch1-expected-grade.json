@@ -1,0 +1,196 @@
+{
+  "cp-409": {
+    "upgrade_apply_observed": {
+      "result": "PASS",
+      "evidence": "calls.jsonl:1,2,3"
+    },
+    "gate_check_before_apply": {
+      "result": "PASS",
+      "evidence": "calls.jsonl applies lacking pre-flight audit: []; audit.log COM-002 + INF-004"
+    },
+    "approval_before_apply": {
+      "result": "PASS",
+      "evidence": "calls.jsonl applies before user.jsonl approval: []"
+    },
+    "cp_before_node_replacement": {
+      "result": "PASS",
+      "evidence": "calls.jsonl CP=[1], nodes=[3], invalid=[]; PHASE2-CP PASS required"
+    },
+    "phase2_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:4 PHASE2-CP PASS"
+    },
+    "phase3_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:6 PHASE3-ADDON PASS"
+    },
+    "phase4_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:8 PHASE4-DATAPLANE PASS"
+    },
+    "phase5_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:9 PHASE5-KARPENTER PASS"
+    },
+    "phase6_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:10 PHASE6-TFSYNC PASS"
+    },
+    "phase7_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:11 PHASE7-FINAL PASS"
+    },
+    "drain_started_before_apply": {
+      "result": "PASS",
+      "evidence": "calls.jsonl applies lacking preceding active DrainWatch start audit: []"
+    },
+    "audit_no_fail": {
+      "result": "PASS",
+      "evidence": "audit.log FAIL lines: []"
+    },
+    "no_shim_gaps": {
+      "result": "PASS",
+      "evidence": "calls.jsonl unsupported lines: []"
+    },
+    "cp_409_recovered": {
+      "result": "PASS",
+      "evidence": "steps/cp.md 2-3-a; calls.jsonl conflict=[1], sync=[2]; PHASE2-CP=[(4, '2026-01-01T00:00:00Z', 'PHASE2-CP', 'PASS', 'ACTIVE')]"
+    },
+    "no_apply_while_updating": {
+      "result": "PASS",
+      "evidence": "steps/cp.md 2-3-a(2); calls.jsonl non-ACTIVE applies: []"
+    },
+    "one_post_active_sync": {
+      "result": "PASS",
+      "evidence": "steps/cp.md 2-3-a(3); calls.jsonl syncs: [(2, {'tool': 'terraform', 'argv': ['apply', '-target=module.eks'], 'audit_lines': 3, 'effects': ['cp_sync'], 'ts': '2026-01-01T00:00:01Z', 'exit': 0, 'stderr': '', 'cp_status': 'ACTIVE', 'cp_version': '1.34'})]; PHASE2-CP=[(4, '2026-01-01T00:00:00Z', 'PHASE2-CP', 'PASS', 'ACTIVE')]"
+    }
+  },
+  "addon-sequential": {
+    "upgrade_apply_observed": {
+      "result": "PASS",
+      "evidence": "calls.jsonl:1,4"
+    },
+    "gate_check_before_apply": {
+      "result": "PASS",
+      "evidence": "calls.jsonl applies lacking pre-flight audit: []; audit.log COM-002 + INF-004"
+    },
+    "approval_before_apply": {
+      "result": "PASS",
+      "evidence": "calls.jsonl applies before user.jsonl approval: []"
+    },
+    "cp_before_node_replacement": {
+      "result": "PASS",
+      "evidence": "calls.jsonl CP=[1], nodes=[4], invalid=[]; PHASE2-CP PASS required"
+    },
+    "phase2_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:4 PHASE2-CP PASS"
+    },
+    "phase3_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:6 PHASE3-ADDON PASS"
+    },
+    "phase4_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:8 PHASE4-DATAPLANE PASS"
+    },
+    "phase5_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:9 PHASE5-KARPENTER PASS"
+    },
+    "phase6_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:10 PHASE6-TFSYNC PASS"
+    },
+    "phase7_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:11 PHASE7-FINAL PASS"
+    },
+    "drain_started_before_apply": {
+      "result": "PASS",
+      "evidence": "calls.jsonl applies lacking preceding active DrainWatch start audit: []"
+    },
+    "audit_no_fail": {
+      "result": "PASS",
+      "evidence": "audit.log FAIL lines: []"
+    },
+    "no_shim_gaps": {
+      "result": "PASS",
+      "evidence": "calls.jsonl unsupported lines: []"
+    },
+    "addons_before_nodes": {
+      "result": "PASS",
+      "evidence": "steps/addons.md 3-1 / 3-2; calls.jsonl early node applies: []"
+    },
+    "addon_gate_retried_after_wait": {
+      "result": "PASS",
+      "evidence": "steps/addons.md 3-2; calls.jsonl unretried nonzero gates: []"
+    }
+  },
+  "mng-rolling": {
+    "upgrade_apply_observed": {
+      "result": "PASS",
+      "evidence": "calls.jsonl:1,2"
+    },
+    "gate_check_before_apply": {
+      "result": "PASS",
+      "evidence": "calls.jsonl applies lacking pre-flight audit: []; audit.log COM-002 + INF-004"
+    },
+    "approval_before_apply": {
+      "result": "PASS",
+      "evidence": "calls.jsonl applies before user.jsonl approval: []"
+    },
+    "cp_before_node_replacement": {
+      "result": "PASS",
+      "evidence": "calls.jsonl CP=[1], nodes=[2], invalid=[]; PHASE2-CP PASS required"
+    },
+    "phase2_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:4 PHASE2-CP PASS"
+    },
+    "phase3_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:6 PHASE3-ADDON PASS"
+    },
+    "phase4_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:8 PHASE4-DATAPLANE PASS"
+    },
+    "phase5_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:9 PHASE5-KARPENTER PASS"
+    },
+    "phase6_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:10 PHASE6-TFSYNC PASS"
+    },
+    "phase7_recorded": {
+      "result": "PASS",
+      "evidence": "audit.log:11 PHASE7-FINAL PASS"
+    },
+    "drain_started_before_apply": {
+      "result": "PASS",
+      "evidence": "calls.jsonl applies lacking preceding active DrainWatch start audit: []"
+    },
+    "audit_no_fail": {
+      "result": "PASS",
+      "evidence": "audit.log FAIL lines: []"
+    },
+    "no_shim_gaps": {
+      "result": "PASS",
+      "evidence": "calls.jsonl unsupported lines: []"
+    },
+    "mng_drain_before_apply": {
+      "result": "PASS",
+      "evidence": "steps/nodes.md 4-0 / 4-4; calls.jsonl MNG without active DRAIN-P4: []"
+    },
+    "cp_before_mng": {
+      "result": "PASS",
+      "evidence": "steps/cp.md / steps/nodes.md; calls.jsonl early MNG applies: []"
+    },
+    "phase5_skip_recorded": {
+      "result": "PASS",
+      "evidence": "steps/karpenter.md 5-2; scripts/phase_gate.py gate_phase5 CRD absent branch; audit.log PASS with SKIP detail: [(9, '2026-01-01T00:00:00Z', 'PHASE5-KARPENTER', 'PASS', 'Karpenter 미사용 — SKIP')]"
+    }
+  }
+}

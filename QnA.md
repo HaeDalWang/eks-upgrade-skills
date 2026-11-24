@@ -6,7 +6,7 @@
 
 Kubernetes는 마이너 버전 +1 단계 업그레이드만 공식 지원합니다. 1.33 → 1.35처럼 2단계를 건너뛰면 API 호환성 문제, Add-on 충돌, 노드 버전 skew 초과 등이 발생할 수 있습니다.
 
-1.33 → 1.34 → 1.35 순서로 두 번 실행해 주세요. 각 단계마다 recipe.md의 `current_version`과 `target_version`을 업데이트하면 됩니다.
+1.33 → 1.34 → 1.35 순서로 두 번 실행해 주세요. 각 단계마다 recipe.md의 `target_version`을 업데이트하면 됩니다 (현재 버전은 라이브 클러스터에서 읽습니다).
 더욱 중요한 점은 2 Step 이상의 버전을 한개의 세션으로 진행 했을때 컨텍스트 제한 등으로 AI Agent가 중요 공지(Release Notes) 등 누락할 수 있어 배제합니다
 
 ---
@@ -34,13 +34,9 @@ Kubernetes는 마이너 버전 +1 단계 업그레이드만 공식 지원합니�
 
 ## 플랫폼 및 IaC 지원
 
-### Q: eksctl이나 CDK로 관리하는 EKS 클러스터도 지원하나요?
+### Q: eksctl·CDK로 관리하는 EKS나 EKS가 아닌 클러스터도 지원하나요?
 
-현재는 Terraform으로 관리하는 EKS 클러스터만 지원합니다. eksctl, CDK, Pulumi 등은 아직 Sub-Skill이 구현되지 않았습니다.
-
-### Q: 온프레미스(Kubespray 등) 클러스터도 지원하나요?
-
-지원 계획이 없습니다. 이 프로젝트는 실제로 운영하며 검증한 EKS + Terraform 조합에 집중합니다.
+지원하지 않습니다. Terraform(`terraform-aws-modules/eks` 모듈)으로 관리하는 EKS 클러스터만 대상입니다. 이 프로젝트는 실제로 운영하며 검증한 EKS + Terraform 조합에 집중합니다.
 
 ---
 
