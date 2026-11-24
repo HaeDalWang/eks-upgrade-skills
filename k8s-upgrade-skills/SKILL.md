@@ -19,7 +19,8 @@ root), not to the user's working directory. Keep script calls and `audit.log` in
 
 ## Start flow
 
-Order is fixed. Nothing changes infrastructure before `PLAN-APPROVED`:
+Order is fixed. Nothing changes infrastructure before `PLAN-APPROVED`, except the separately
+user-approved Phase 0 Fargate refresh in `steps/start.md`:
 
 1. discover (`scripts/discover.py`, read-only) → `discovery.json`
 2. Phase 0 gate (`scripts/gate_check.py`)
@@ -43,7 +44,7 @@ Open [steps/start.md](steps/start.md) and follow it for these seven steps.
    `services`) in the background and wait for its `START` line before any apply that can move pods.
    Never force-drain past a PodDisruptionBudget.
 5. **Stop on failure.** Any FAIL or unexpected destroy/replace → stop, report, wait for the user.
-   No automatic rollback: an EKS Control Plane upgrade is irreversible.
+   No automatic rollback; a Control Plane rollback (EKS allows it within 7 days) is the user's call — see `steps/failure.md`.
 
 ## Exit codes and `NEXT:`
 

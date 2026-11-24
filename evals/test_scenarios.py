@@ -219,3 +219,40 @@ def test_batch1_grading_identical_to_8b75581_snapshot(tmp_path, name):
     handwritten_fixture(tmp_path, name)
     expected = json.loads((Path(__file__).parent / 'fixtures/batch1-expected-grade.json').read_text())
     assert grade(tmp_path) == expected[name]
+
+
+@pytest.mark.parametrize("name", [p.stem for p in sorted(SCENARIO.parent.glob("*.json"))])
+def test_new_preflight_rules_pass_in_existing_scenarios(tmp_path, name):
+    sb = sandbox_for(tmp_path, name)
+    result = script(sb, 'gate_check.py', '--cluster-name', 'demo-eks',
+                    '--current-version', '1.33', '--target-version', '1.34')
+    assert result.returncode in (0, 1, 2), result.stdout + result.stderr
+    audit = records((sb[0] / 'project/audit.log').read_text().splitlines())
+    for rule in ('COM-005', 'INF-005'):
+        assert any(r[2:4] == (rule, 'PASS') for r in audit), result.stdout
+    assert not any('shim: unsupported' in c['stderr'] for c in read_jsonl(sb[0] / 'calls.jsonl'))
+
+
+def test_fargate_behind_current_cp_warns_with_ask_user_then_restart_clears_it(tmp_path):
+    sb = sandbox_for(tmp_path, 'normal-karpenter-fargate')
+    state_path = sb[0] / 'state.json'
+    state = json.loads(state_path.read_text())
+    state['fargate_version'] = '1.32'
+    state_path.write_text(json.dumps(state))
+    args = ('--cluster-name', 'demo-eks', '--current-version', '1.33', '--target-version', '1.34')
+    result = script(sb, 'gate_check.py', *args)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1].startswith('NEXT: ASK_USER')
+    assert 'restart those Fargate pods before the Control Plane upgrade' in result.stdout
+    cli(sb, 'kubectl', 'rollout', 'restart', 'deployment/coredns', '-n', 'kube-system')
+    assert script(sb, 'gate_check.py', *args).returncode == 0
+
+
+def test_phase4_cli_defers_karpenter_and_fargate_but_phase7_rejects_old_nodes(tmp_path):
+    sb = sandbox_for(tmp_path, 'normal-karpenter-fargate')
+    finish_cp(sb)
+    args = ('--cluster-name', 'demo-eks', '--target-version', '1.34')
+    result = script(sb, 'phase_gate.py', 'phase4', *args)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert '→ phase5, Fargate ' in result.stdout
+    assert script(sb, 'phase_gate.py', 'phase7', *args).returncode == 1

@@ -125,6 +125,12 @@ python3 scripts/phase_gate.py phase4 \
   --audit-log audit.log
 ```
 
+The node version/Ready check covers MNG nodes and unlabeled nodes (safe side).
+Karpenter nodes (`karpenter.sh/nodepool`) are excluded here and verified in phase5;
+Fargate nodes (`eks.amazonaws.com/compute-type=fargate`) are verified in phase7 after 7-0.
+Excluded counts appear in the gate detail. Pod classification and FailedEvict checks still cover
+all workloads; this gate runs even with no MNG step.
+
 **WARN (exit 2)** lists STALE or TRANSIENT pods; the script only classifies, it deletes nothing:
 - STALE: `kubectl delete pod -n <ns> <name>`, then rerun the gate.
 - TRANSIENT: wait 60 s, then rerun the gate.

@@ -431,7 +431,8 @@ def classify_pods(pods_json: dict, nodes_json: dict, now=None) -> PodClassificat
 
 
 @phase_boundary(4)
-def gate_phase4(cluster_name: str, target_version: str, audit_log: str) -> int:
+def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
+                node_scope: str = "all") -> int:
     """Phase 4: 노드 버전 + FailedEvict + Pod 분류. 반환: exit code (0/1/2)."""
     reset_gate()
     audit_init(cluster_name, "", target_version)
@@ -471,7 +472,19 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str) -> int:
 
     version_pattern = re.compile(rf"v{re.escape(target_version)}\.")
     bad_nodes = []
+    checked = 0
+    excluded_karpenter = 0
+    excluded_fargate = 0
     for node in nodes:
+        labels = node.get("metadata", {}).get("labels", {})
+        if node_scope == "mng":
+            if labels.get("eks.amazonaws.com/compute-type") == "fargate":
+                excluded_fargate += 1
+                continue
+            if "karpenter.sh/nodepool" in labels:
+                excluded_karpenter += 1
+                continue
+        checked += 1
         name = node.get("metadata", {}).get("name", "?")
         kubelet_ver = node.get("status", {}).get("nodeInfo", {}).get("kubeletVersion", "")
         conditions = {
@@ -486,15 +499,18 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str) -> int:
         elif ready != "True":
             bad_nodes.append(f"{name}(NotReady)")
 
+    scope_detail = (f"; Karpenter {excluded_karpenter} → phase5, Fargate {excluded_fargate} → phase7"
+                    if node_scope == "mng" else "")
     if bad_nodes:
-        detail = f"비정상 노드: {', '.join(bad_nodes)}"
+        detail = f"비정상 노드: {', '.join(bad_nodes)}{scope_detail}"
         audit_write("PHASE4-DATAPLANE", "FAIL", detail)
         print(f"{RED}❌ PHASE4-DATAPLANE FAIL{NC}  {detail}")
         audit_flush(audit_log)
         return 1
     else:
-        audit_write("PHASE4-DATAPLANE", "PASS", f"모든 노드 v{target_version}.x + Ready ({len(nodes)}개)")
-        print(f"{GREEN}✅ PHASE4-DATAPLANE PASS{NC}  모든 노드 v{target_version}.x + Ready ({len(nodes)}개)")
+        detail = f"검사 대상 노드 v{target_version}.x + Ready ({checked}개){scope_detail}"
+        audit_write("PHASE4-DATAPLANE", "PASS", detail)
+        print(f"{GREEN}✅ PHASE4-DATAPLANE PASS{NC}  {detail}")
 
     # 2. FailedEvict 이벤트 확인 (최근 10분 이내만 — 오래된 이벤트 false positive 방지)
     r = run_cmd(["kubectl", "get", "events", "-A", "--field-selector", "reason=FailedEvict", "-o", "json"])
@@ -783,10 +799,10 @@ def gate_phase7(cluster_name: str, target_version: str, audit_log: str) -> int:
     sub_results = {}
 
     # 1. Call sub-gates — each writes to temp audit, then append to main audit
-    def _run_sub_gate(name, gate_fn, *args):
+    def _run_sub_gate(name, gate_fn, *args, **kwargs):
         with tempfile.TemporaryDirectory() as tmpdir:
             sub_audit = os.path.join(tmpdir, "sub_audit.log")
-            rc = gate_fn(*args, sub_audit)
+            rc = gate_fn(*args, sub_audit, **kwargs)
             # Append sub-gate audit to main audit log
             sub_path = _Path(sub_audit)
             if sub_path.exists():
@@ -798,7 +814,8 @@ def gate_phase7(cluster_name: str, target_version: str, audit_log: str) -> int:
 
     sub_results["phase2"] = _run_sub_gate("phase2", gate_phase2, cluster_name, target_version)
     sub_results["phase3"] = _run_sub_gate("phase3", gate_phase3, cluster_name)
-    sub_results["phase4"] = _run_sub_gate("phase4", gate_phase4, cluster_name, target_version)
+    sub_results["phase4"] = _run_sub_gate("phase4", gate_phase4, cluster_name, target_version,
+                                       node_scope="all")
 
     # 2. Now init our own audit session (sub-gates cleared state via reset_gate)
     reset_gate()
@@ -925,7 +942,7 @@ def main() -> None:
     elif args.phase == "phase3":
         rc = gate_phase3(args.cluster_name, args.audit_log)
     elif args.phase == "phase4":
-        rc = gate_phase4(args.cluster_name, args.target_version, args.audit_log)
+        rc = gate_phase4(args.cluster_name, args.target_version, args.audit_log, node_scope="mng")
     elif args.phase == "phase5":
         rc = gate_phase5(args.target_version, args.audit_log)
     elif args.phase == "phase6":

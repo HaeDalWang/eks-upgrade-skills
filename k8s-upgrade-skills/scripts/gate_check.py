@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gate_check.py — Phase 0 사전 검증 (18개 규칙 전체)
+gate_check.py — Phase 0 사전 검증 (20개 규칙 전체)
 
 이 스크립트가 Gate를 판단합니다.
   exit code 0 = Gate OPEN  (진행 가능)
@@ -15,7 +15,7 @@ Usage:
     [--tf-dir /path/to/terraform] \\
     [--audit-log audit.log]
 
-18개 사전 검증 규칙을 실행합니다.
+20개 사전 검증 규칙을 실행합니다.
 --tf-dir 제공 시 INF-001/INF-004 (Terraform drift/recreate) 검증을 추가 실행합니다.
 """
 
@@ -90,6 +90,7 @@ _INF002_FALLBACK_TYPES = [
 # ── CAP-003 서브넷 가용 IP 임계값 ──
 SUBNET_CRIT_IP = 10   # 이 미만이면 surge 노드 추가 불가
 SUBNET_WARN_IP = 50   # 이 미만이면 여유 부족 경고
+CP_SUBNET_MIN_IP = 5  # CP 버전 업데이트용 ENI 여유 IP
 
 
 # ══════════════════════════════════════════════════════════════
@@ -182,11 +183,11 @@ def check_com001(cluster_name: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════
-# COM-002a: kubelet 버전 skew 검증 (CRITICAL)
+# COM-002a: kubelet 버전 skew 검증 (CRITICAL/HIGH)
 # https://kubernetes.io/releases/version-skew-policy/
 # K8s 1.28+: kubelet skew 허용 n-3, 미만: n-2
 # ══════════════════════════════════════════════════════════════
-def check_com002a(target_version: str) -> None:
+def check_com002a(target_version: str, current_version: str) -> None:
     targ_parts = target_version.split(".")
     if len(targ_parts) < 2:
         record("COM-002a", "CRITICAL", "FAIL",
@@ -197,6 +198,12 @@ def check_com002a(target_version: str) -> None:
     except ValueError:
         record("COM-002a", "CRITICAL", "FAIL",
                f"버전 형식 오류 ({target_version}) → 마이너 버전이 정수가 아닙니다")
+        return
+    try:
+        current_minor = int(current_version.split(".")[1].split("-")[0])
+    except (IndexError, ValueError):
+        record("COM-002a", "CRITICAL", "FAIL",
+               f"현재 CP 버전 형식 오류 ({current_version}) — kubelet 비교 불가")
         return
     # K8s 1.28부터 kubelet skew 정책이 n-3으로 완화됨
     max_skew = KUBELET_SKEW_NEW if targ_minor >= KUBELET_SKEW_RELAXED_MINOR else KUBELET_SKEW_OLD
@@ -211,6 +218,8 @@ def check_com002a(target_version: str) -> None:
                "노드 0개 조회 — kubelet skew 검증 불가 → kubeconfig 컨텍스트/RBAC 권한 확인")
         return
     violations = 0
+    older_nodes = []
+    older_fargate = []
     for node in node_items:
         ver = node.get("status", {}).get("nodeInfo", {}).get("kubeletVersion", "")
         if not ver:
@@ -224,10 +233,25 @@ def check_com002a(target_version: str) -> None:
             continue
         if targ_minor - node_minor > max_skew:
             violations += 1
+        if node_minor < current_minor:
+            metadata = node.get("metadata", {})
+            label = f"{metadata.get('name', 'unknown')}({ver})"
+            if metadata.get("labels", {}).get("eks.amazonaws.com/compute-type") == "fargate":
+                older_fargate.append(label)
+            else:
+                older_nodes.append(label)
 
     if violations > 0:
         record("COM-002a", "CRITICAL", "FAIL",
                f"kubelet skew > {max_skew} 노드 {violations}개 → 해당 노드의 kubelet을 먼저 업그레이드하세요")
+    elif older_nodes or older_fargate:
+        details = [f"kubelet < current CP {current_version}"]
+        if older_nodes:
+            details.append("노드: " + ", ".join(older_nodes))
+        if older_fargate:
+            details.append("Fargate: " + ", ".join(older_fargate) +
+                           " — restart those Fargate pods before the Control Plane upgrade")
+        record("COM-002a", "HIGH", "FAIL", "; ".join(details))
     else:
         record("COM-002a", "CRITICAL", "PASS",
                f"kubelet skew 정상 (모두 ≤ {max_skew})")
@@ -370,6 +394,27 @@ def check_com004(cluster_name: str, target_version: str) -> None:
     else:
         record("COM-004", "CRITICAL", "PASS",
                f"UPGRADE_READINESS 전부 PASSING ({len(readiness)}개)")
+
+
+# COM-005: EKS Auto Mode 검증 (CRITICAL)
+def check_com005(cluster_name: str) -> None:
+    """COM-005: EKS Auto Mode compute is unsupported (DescribeCluster API)."""
+    r = run_cmd(["aws", "eks", "describe-cluster", "--name", cluster_name, "--output", "json"])
+    try:
+        if r.returncode != 0:
+            raise ValueError("describe-cluster 실패")
+        cluster = json.loads(r.stdout)["cluster"]
+        config = cluster.get("computeConfig", {})
+        enabled = config.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ValueError("computeConfig.enabled가 boolean이 아님")
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        record("COM-005", "CRITICAL", "FAIL", f"Auto Mode unknown — {exc}")
+        return
+    if enabled:
+        record("COM-005", "CRITICAL", "FAIL", "EKS Auto Mode enabled — unsupported")
+    else:
+        record("COM-005", "CRITICAL", "PASS", "EKS Auto Mode 비활성 (computeConfig.enabled != true)")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1128,6 +1173,43 @@ def check_inf003() -> None:
                f"Karpenter {version} — disruption budget 정상")
 
 
+# INF-005: Control Plane 서브넷 IP 검증 (CRITICAL)
+def check_inf005(cluster_name: str) -> None:
+    """INF-005: every CP subnet needs at least five available IP addresses."""
+    r = run_cmd(["aws", "eks", "describe-cluster", "--name", cluster_name, "--output", "json"])
+    try:
+        if r.returncode != 0:
+            raise ValueError("describe-cluster 실패")
+        subnet_ids = json.loads(r.stdout)["cluster"]["resourcesVpcConfig"]["subnetIds"]
+        if not isinstance(subnet_ids, list) or not subnet_ids or any(
+                not isinstance(sid, str) or not sid for sid in subnet_ids):
+            raise ValueError("CP subnetIds 누락/형식 오류")
+    except (ValueError, KeyError, TypeError) as exc:
+        record("INF-005", "CRITICAL", "FAIL", f"CP 서브넷 unknown — {exc}")
+        return
+    r = run_cmd(["aws", "ec2", "describe-subnets", "--subnet-ids", *sorted(set(subnet_ids)),
+                 "--output", "json"])
+    try:
+        if r.returncode != 0:
+            raise ValueError("describe-subnets 실패")
+        subnets = {s["SubnetId"]: s["AvailableIpAddressCount"] for s in json.loads(r.stdout)["Subnets"]}
+        low = []
+        for sid in subnet_ids:
+            available = subnets.get(sid)
+            if type(available) is not int or available < 0:
+                raise ValueError(f"{sid} 가용 IP unknown — 누락/형식 오류")
+            if available < CP_SUBNET_MIN_IP:
+                low.append(f"{sid}({available})")
+    except (ValueError, KeyError, TypeError) as exc:
+        record("INF-005", "CRITICAL", "FAIL", f"CP 서브넷 검증 불가 — {exc}")
+        return
+    if low:
+        record("INF-005", "CRITICAL", "FAIL",
+               f"CP 서브넷 가용 IP < {CP_SUBNET_MIN_IP}: {', '.join(low)} → IP 확보 후 재시도")
+    else:
+        record("INF-005", "CRITICAL", "PASS", f"모든 CP 서브넷 가용 IP ≥ {CP_SUBNET_MIN_IP}")
+
+
 # ══════════════════════════════════════════════════════════════
 # main
 # ══════════════════════════════════════════════════════════════
@@ -1136,7 +1218,7 @@ def main() -> None:
 
     CRITICAL FAIL (any rule or invalid input) -> STOP (exit 1).
     HIGH FAIL -> ASK_USER (exit 2), for each of:
-      COM-003, COM-004, WLS-002, WLS-006, CAP-001, CAP-003, INF-003, INF-004.
+      COM-002a (behind current CP), COM-003, COM-004, WLS-002, WLS-006, CAP-001, CAP-003, INF-003, INF-004.
     MEDIUM/LOW FAIL -> report only (exit 0); no NEXT instruction is needed.
     """
     parser = GateArgumentParser(
@@ -1186,10 +1268,10 @@ def main() -> None:
 
     # ── 전체 규칙 목록 (SKIPPED 추적용) ──
     ALL_RULES = [
-        "COM-002", "COM-001", "COM-002a", "COM-003", "COM-004",
+        "COM-002", "COM-001", "COM-002a", "COM-003", "COM-004", "COM-005",
         "WLS-001", "WLS-002", "WLS-003", "WLS-004", "WLS-005", "WLS-006",
         "CAP-001", "CAP-002", "CAP-003",
-        "INF-001", "INF-002", "INF-003", "INF-004",
+        "INF-001", "INF-002", "INF-003", "INF-004", "INF-005",
     ]
     executed_rules: list[str] = []
 
@@ -1209,12 +1291,14 @@ def main() -> None:
     else:
         check_com001(args.cluster_name)
         track("COM-001")
-        check_com002a(args.target_version)
+        check_com002a(args.target_version, args.current_version)
         track("COM-002a")
         check_com003(args.cluster_name, args.target_version)
         track("COM-003")
         check_com004(args.cluster_name, args.target_version)
         track("COM-004")
+        check_com005(args.cluster_name)
+        track("COM-005")
 
         # ── 2단계: 워크로드 안전성 ──
         print("\n── 2단계: 워크로드 안전성 ──")
@@ -1268,6 +1352,9 @@ def main() -> None:
         else:
             record("INF-004", "HIGH", "SKIP", "--tf-dir 미제공")
             track("INF-004")
+
+        check_inf005(args.cluster_name)
+        track("INF-005")
 
     # ── Gate 판정 ──
     print()

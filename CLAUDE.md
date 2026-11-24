@@ -96,7 +96,7 @@ k8s-upgrade-skills/          ← AI Agent가 읽는 스킬 디렉토리 (install
 │   └── failure.md           ← FAIL 시 대응 + 실패 보고서
 ├── scripts/
 │   ├── lib.py               ← 공통 헬퍼: GateResult, audit_flush, audit_append, kubectl_json, record, _parse_cpu/_parse_mem
-│   ├── gate_check.py        ← Phase 0: 18개 사전 검증 규칙 (COM/WLS/CAP/INF)
+│   ├── gate_check.py        ← Phase 0: 20개 사전 검증 규칙 (COM/WLS/CAP/INF)
 │   ├── phase_gate.py        ← Phase 2~7: 각 Phase Gate 함수 (phase2~phase7 서브커맨드)
 │   ├── discover.py          ← 읽기 전용 탐색 → discovery.json
 │   ├── upgrade_plan.py      ← 계획 create/approve/next/done/skip (audit.log 기반 진행)
@@ -164,14 +164,14 @@ helm_compat_check.py ──imports──▶ compat_lib.py   (별도 스킬, lib.
 
 ### gate_check.py 규칙 함수 구조
 
-18개 규칙은 카테고리별 함수로 구현되어 있다:
+20개 규칙은 카테고리별 함수로 구현되어 있다:
 
 | 카테고리 | 함수 | 규칙 ID |
 |---------|------|---------|
-| common | `check_com001` ~ `check_com004` | COM-001, COM-002, COM-002a, COM-003, COM-004 |
+| common | `check_com001` ~ `check_com005` | COM-001, COM-002, COM-002a, COM-003, COM-004, COM-005 |
 | workload-safety | `check_wls001` ~ `check_wls006` | WLS-001 ~ WLS-006 |
 | capacity | `check_cap001` ~ `check_cap003` | CAP-001 ~ CAP-003 |
-| infrastructure | `check_inf001` ~ `check_inf004` | INF-001 ~ INF-004 |
+| infrastructure | `check_inf001` ~ `check_inf005` | INF-001 ~ INF-005 |
 
 `main()`의 `ALL_RULES` 리스트가 실행 순서를 결정한다. `--tf-dir` 미제공 시 INF-001/INF-004는 SKIP으로 기록된다.
 
@@ -230,4 +230,4 @@ Python 3.9+ 지원. `dict | None` 타입 힌트 사용 불가 → `Optional[dict
 3. `lib.py`의 상수(`SYSTEM_NS`, `DATA_PLANE_RESOURCES` 등) 재사용 여부 확인
 4. `tests/test_gate_check.py`에 대응 테스트 클래스 추가 (`reset_gate()` fixture 자동 적용됨)
 5. `docs/required-permissions.md`에 필요 권한 추가
-6. README·`steps/start.md`의 규칙 개수와 목록 갱신 (현재 18개)
+6. README·`steps/start.md`의 규칙 개수와 목록 갱신 (현재 20개)
