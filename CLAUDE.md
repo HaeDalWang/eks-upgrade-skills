@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pip install -e ".[test]"
 
 # 테스트 전체 실행
-python3 -m pytest tests/
+python3 -m pytest tests/ evals/
 
 # 단일 테스트 클래스 실행
 python3 -m pytest tests/test_gate_check.py::TestCom002MalformedVersion -v
@@ -65,10 +65,13 @@ python3 helm-k8s-compat/scripts/helm_compat_check.py \
   --registry-dir helm-k8s-compat/registry \
   --audit-log audit.log
 
-# 스킬 설치 / 업데이트 / 상태 확인
-./install.sh --tool claude
-./install.sh --tool claude --force   # 재설치(업데이트)
-./install.sh --status
+# Plugin 설치 / 상태 확인
+claude plugin marketplace add .
+claude plugin install k8s-upgrade-skills@k8s-upgrade-skills
+claude plugin list
+claude plugin validate .
+codex plugin marketplace add HaeDalWang/k8s-upgrade-skills
+codex plugin add k8s-upgrade-skills@k8s-upgrade-skills  # /hooks에서 hook 신뢰
 ```
 
 ## 아키텍처
@@ -87,7 +90,10 @@ python3 helm-k8s-compat/scripts/helm_compat_check.py \
 ### 파일 구조
 
 ```
-k8s-upgrade-skills/          ← AI Agent가 읽는 스킬 디렉토리 (install.sh로 전역 설치됨)
+.claude-plugin/             ← plugin.json + self-marketplace marketplace.json
+hooks/                     ← hooks.json + apply_guard_hook.py (PreToolUse)
+
+k8s-upgrade-skills/          ← AI Agent가 읽는 스킬 디렉토리 (plugin으로 설치됨)
 ├── SKILL.md                 ← 진입점(≤170줄): 시작 흐름, 절대 규칙, exit code/NEXT, 인증, step 루프, 압축 후 복구
 ├── steps/                   ← Phase별 자기완결 절차 (각 파일은 upgrade_plan.py next로 시작)
 │   ├── start.md             ← discover → Phase 0 → 인터뷰 → recipe → plan → 승인
@@ -110,7 +116,7 @@ k8s-upgrade-skills/          ← AI Agent가 읽는 스킬 디렉토리 (install
 ├── docs/
 │   └── inline-monitors.md   ← 인라인 모니터 설계 근거 + 감지 신호 레퍼런스 (sub-agent 정의 아님)
 ├── schemas/
-│   └── recipe.schema.json   ← recipe.yaml IDE 스키마 (VSCode/Kiro)
+│   └── recipe.schema.json   ← recipe.yaml IDE 스키마 (IDE)
 
 helm-k8s-compat/             ← 독립 스킬: Helm 차트 ↔ K8s 버전 호환성 사전 점검
 ├── SKILL.md                 ← 워크플로우 (helm ls → registry 대조 → exit code)
@@ -128,6 +134,7 @@ tests/
 ├── test_audit_event.py      ← audit_event.py 단위 테스트
 ├── test_validate_recipe.py  ← validate_recipe.py 단위 테스트
 ├── test_report.py           ← report.py 단위 테스트 (누적 로그·실패 실행)
+├── test_apply_guard_hook.py ← PreToolUse saved-plan 검증 (subprocess stdin JSON)
 ├── test_skill_docs.py       ← 스킬 문서 lint: gate/monitor/guard 순서 보존
 ├── test_helm_compat_check.py ← compat_lib.py 순수 함수 테스트
 └── test_helm_compat_e2e.py  ← helm_compat_check.py 통합 테스트 (CLI/exit code)
@@ -213,7 +220,8 @@ Python 3.9+ 지원. `dict | None` 타입 힌트 사용 불가 → `Optional[dict
 
 ```bash
 # 1. 스킬 설치
-./install.sh --tool claude
+claude plugin marketplace add .
+claude plugin install k8s-upgrade-skills@k8s-upgrade-skills
 
 # 2. EKS 프로젝트 루트에서 AI Agent에게 요청
 # "EKS 클러스터를 업그레이드해줘"

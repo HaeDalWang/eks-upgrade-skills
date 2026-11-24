@@ -27,7 +27,9 @@ K8S_EVAL=1 python3 -m evals.runner --model claude-opus-5-5 --run-dir evals/runs/
 결과 디렉토리에 저장하지 않는다. 실패한 shim gap을 고친 뒤의 재실행까지 **최대 3회**다.
 
 각 run은 임시 HOME, 일반화한 example Terraform 복사본, shim bin을 갖는다.
-`install.sh --tool claude`로 현재 skill을 설치한다. 자식 환경은 HOME/PATH/TERM/LANG/
+`claude plugin marketplace add <REPO>`와 `claude plugin install k8s-upgrade-skills@k8s-upgrade-skills`로 현재 plugin을 설치한다.
+`claude plugin list --json` 결과가 enabled가 아니면 실패하며 전체 설치 출력은 `install.log`에 남긴다.
+스크립트 호출은 plugin cache에서도 basename으로 집계하며 hook 자체는 agent call로 기록하지 않는다. 자식 환경은 HOME/PATH/TERM/LANG/
 CLAUDE_CODE_OAUTH_TOKEN만 전달하고, 매 turn 전에 CLI 경로와 환경을 검사한다.
 이는 PATH/환경 격리이며 OS 수준의 filesystem/network sandbox는 아니다.
 Fake user는 tools/MCP를 끈 Haiku로 agent 메시지 끝 2500자에서 답안 ID만 선택한다.
@@ -168,3 +170,12 @@ exit 2/ASK_USER로 멈춘다. `nodes` step은 기대값과 AMI가 일치하지 �
 `drain_watch.py`는 gate가 아니므로 `NEXT:`를 출력하지 않는다. PDB=0만으로는 WARN/exit 0이며,
 이 fixture는 실제 Phase 4 FailedDrain 이벤트도 노출하여 monitor exit 1을 검증한다.
 중단·보고는 agent의 규칙 준수 여부로 별도 채점한다. shim은 차단 중 node rollout을 완료시키지 않는다.
+
+
+### APPLY-GUARD hook live smoke (maintainer only)
+
+`K8S_EVAL=1 python -m pytest evals/test_plugin_hook.py -m eval_live -v -s`는 임시 HOME에
+runner의 `prepare()`로 실제 plugin을 설치하고, PLAN-APPROVED만 있는 프로젝트에서
+`claude -p --permission-mode bypassPermissions --model haiku`로 apply를 요청한다.
+Terraform stub 미실행과 transcript의 deny reason을 모두 검증한다. Offline suite에서는 skip한다.
+Codex CLI hook 실행 여부는 이 Claude smoke로 검증되지 않으며 `/hooks` 신뢰 후 별도 확인이 필요하다.

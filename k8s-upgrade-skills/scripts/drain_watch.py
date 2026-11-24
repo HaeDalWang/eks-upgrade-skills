@@ -38,7 +38,7 @@ from typing import Optional
 try:
     from lib import audit_append, run_cmd
 except ImportError:
-    print("ERROR: lib.py not found. Run install.sh --force to reinstall.", file=sys.stderr)
+    print("ERROR: lib.py not found. Please reinstall the plugin.", file=sys.stderr)
     sys.exit(1)
 
 

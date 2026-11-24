@@ -122,11 +122,22 @@ def prepare(run, scenario, claude):
     python_cli.chmod(0o755)
     env = environment(run / 'home', run / 'bin', claude)
     guard(env, run / 'bin')
-    installed = subprocess.run(['/bin/bash', str(REPO / 'install.sh'), '--tool', 'claude'],
-                               env=env, cwd=REPO, capture_output=True, text=True)
-    (run / 'install.log').write_text(installed.stdout + installed.stderr)
-    if installed.returncode:
-        raise RuntimeError('skill installation failed: see install.log')
+    commands = [
+        [str(claude), 'plugin', 'marketplace', 'add', str(REPO)],
+        [str(claude), 'plugin', 'install', 'k8s-upgrade-skills@k8s-upgrade-skills'],
+        [str(claude), 'plugin', 'list', '--json'],
+    ]
+    with (run / 'install.log').open('w') as log:
+        for command in commands:
+            installed = subprocess.run(command, env=env, cwd=REPO, capture_output=True,
+                                       text=True, timeout=120)
+            log.write('$ ' + ' '.join(command) + '\n' + installed.stdout + installed.stderr)
+            if installed.returncode:
+                raise RuntimeError('plugin installation failed: see install.log')
+    plugins = json.loads(installed.stdout)
+    if not any(p.get('id') == 'k8s-upgrade-skills@k8s-upgrade-skills' and p.get('enabled') is True
+               for p in plugins):
+        raise RuntimeError('plugin is not enabled: see install.log')
     return env
 
 

@@ -1,0 +1,5 @@
+{
+  "name": "k8s-upgrade-skills",
+  "owner": {"name": "k8s-upgrade-skills maintainers"},
+  "plugins": [{"name": "k8s-upgrade-skills", "source": "./"}]
+}

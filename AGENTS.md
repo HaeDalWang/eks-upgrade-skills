@@ -9,3 +9,5 @@ Rules for agents changing this repo. Commands and architecture are in CLAUDE.md.
 - Tests for audit.log readers must cover cumulative logs from earlier runs and other target versions.
 - Live evals (`K8S_EVAL=1`) cost money and are run by the maintainer, not by workers. Judge a live run by its `grade.json` FAIL list; a green pytest only means the run finished.
 - Public repo: no customer names, people's names, account IDs or costs from real upgrades in code, tests, commits or docs.
+
+- Offline hook check: `python3 -m pytest tests/test_apply_guard_hook.py tests/test_skill_docs.py evals/test_plugin_hook.py -q` (live smoke stays skipped).

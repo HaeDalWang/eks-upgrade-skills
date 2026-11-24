@@ -44,11 +44,23 @@ python3 scripts/drain_watch.py --phase P2 --scope kube-system --audit-log audit.
 (cd "${TF_DIR}" && ${AUTH_PREFIX} terraform plan -target="${ADDON_TARGET}" -var-file="${TF_VAR_FILE}" -out="${TF_DIR}/addon.tfplan") &&
 python3 scripts/plan_check.py --planfile "${TF_DIR}/addon.tfplan" --plan-doc "${PLAN_DOC}" \
   --target-version "${TARGET_VERSION}" --tf-dir "${TF_DIR}" \
-  --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
+  --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log
+```
+
+Call 1: run apply_guard in a separate foreground Bash call, only after the preceding command exits 0.
+
+```bash
 python3 scripts/apply_guard.py --planfile "${TF_DIR}/addon.tfplan" --plan-doc "${PLAN_DOC}" \
   --cluster-name "${CLUSTER_NAME}" --target-version "${TARGET_VERSION}" \
-  --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log &&
-(cd "${TF_DIR}" && ${AUTH_PREFIX} terraform apply "${TF_DIR}/addon.tfplan")
+  --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log
+```
+
+Call 2: only after Call 1 exits 0, use a separate Bash call with `run_in_background: true`.
+Substitute actual literal values for `<TF_DIR>` and `<AUTH_PREFIX>` (omit an empty prefix); quote paths as needed.
+The hook denies `$`/subshells in an apply command.
+
+```bash
+cd <TF_DIR> && <AUTH_PREFIX> terraform apply <TF_DIR>/addon.tfplan
 ```
 
 ## 3-1. Wait for add-on stabilization
