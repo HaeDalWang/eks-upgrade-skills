@@ -887,8 +887,9 @@ def gate_phase6(tf_dir: str, audit_log: str, auth_prefix: str = "", tf_var_file:
             return 1
 
         if plan_result.returncode != 0 and plan_result.returncode != 2:
-            audit_write("PHASE6-TFSYNC", "FAIL", f"terraform plan 실패 (exit {plan_result.returncode})")
-            print(f"{RED}❌ PHASE6-TFSYNC FAIL{NC}  terraform plan 실패 (exit {plan_result.returncode})")
+            reason = (plan_result.stderr.strip().splitlines() or ["no stderr"])[-1][:200]
+            audit_write("PHASE6-TFSYNC", "FAIL", f"terraform plan 실패 (exit {plan_result.returncode}): {reason}")
+            print(f"{RED}❌ PHASE6-TFSYNC FAIL{NC}  terraform plan 실패 (exit {plan_result.returncode}): {reason}")
             audit_flush(audit_log)
             return 1
 

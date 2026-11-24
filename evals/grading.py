@@ -12,6 +12,7 @@ from lib import parse_audit_line
 from .safety_checks import SAFETY_ASSERTIONS, safety_checks
 from .scenario_checks import scenario_checks
 from .batch2_checks import batch2_checks
+from .backlog_checks import backlog_checks
 from .plan_checks import PLAN_ASSERTIONS, plan_checks
 
 
@@ -172,6 +173,7 @@ def grade(run):
     summary_path = run / 'summary.json'
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
     batch2_checks(check, scenario, calls, audit, applies, before, users, final, summary)
+    backlog_checks(check, run, scenario, calls, audit, applies, users, final)
     if scenario.get('safety_checks_version', 0) >= 2:
         safety_checks(check, calls, audit, users)
     if scenario.get('safety_checks_version', 0) >= 3:

@@ -109,9 +109,10 @@ def eks(operation, args, state, scenario):
             state['addons'][state['addon_queue'][0]]['polls'] = scenario['transitions']['addon_polls'] - 1
         cluster = {'name': scenario['cluster_name'], 'version': state['version'],
                    'status': 'UPDATING' if updating else state['status'],
-                   'computeConfig': {'enabled': False},
+                   'computeConfig': {'enabled': bool(state.get('auto_mode'))},
                    'resourcesVpcConfig': {'subnetIds': ['subnet-cp-a', 'subnet-cp-b']},
-                   'endpoint': 'https://eks.example.com', 'health': {'issues': []}}
+                   'endpoint': 'https://eks.example.com', 'health': {'issues': []},
+                   'tags': {'environment': 'external-edit' if state.get('tag_drift') else 'demo'}}
         return render({'cluster': cluster}, args), 0
     if operation == 'list-addons':
         return render({'addons': list(state['addons'])}, args), 0
@@ -159,6 +160,8 @@ def eks(operation, args, state, scenario):
 
 
 def mng_updating(state):
+    if state.get('drain_blocked'):
+        return True
     return tick(state, 'mng_remaining', {
         'node_version': state.get('node_target', state['node_version']),
         'mng_release': state.get('mng_release_target', state['ami_alias'])}, early=True)
@@ -266,7 +269,7 @@ def resources(kind, state):
             [deployment('karpenter', 'karpenter', 'example.com/karpenter:1.8.3')]
             if topology['karpenter'] else [])
     if kind == 'pdb':
-        blocked = state.get('pdb_remaining', 0) > 0
+        blocked = state.get('drain_blocked') or state.get('pdb_remaining', 0) > 0
         state['pdb_remaining'] = max(0, state.get('pdb_remaining', 0) - 1)
         return [{'kind': 'PodDisruptionBudget', 'metadata': {'name': 'web',
             'namespace': 'default'}, 'spec': {'selector': {'matchLabels': {'app': 'web'}}}, 'status': {'disruptionsAllowed': 0 if blocked else 1, 'expectedPods': 2}}]
@@ -296,6 +299,11 @@ def resources(kind, state):
                   'labels': {'kubernetes.io/service-name': 'web'}},
                  'endpoints': [{'conditions': {'ready': True}, 'addresses': ['192.0.2.' + str(i + 1)]}
                                for i in range(0 if tick(state, 'service_remaining', {}) else 2)]}]
+    if kind == 'events' and state.get('drain_blocked'):
+        return [{'kind': 'Event', 'metadata': {'name': 'drain-blocked', 'namespace': 'default',
+            'uid': 'eval-drain-blocked'}, 'type': 'Warning', 'reason': 'FailedDrain', 'count': 1,
+            'involvedObject': {'name': 'worker-a', 'kind': 'Node'},
+            'message': 'Cannot evict pod: PDB web disruptionsAllowed=0'}]
     if kind in {'events', 'pv', 'statefulsets', 'daemonsets', 'jobs', 'ingresses'}:
         return []
     raise ValueError('kubectl resource')
@@ -563,6 +571,20 @@ def plan(project, args, state, scenario):
         changes.append({'address': 'kubectl_manifest.karpenter_default_node_class',
             'type': 'kubectl_manifest', 'change': {'actions': ['update'],
                 'before': node_class(state['ami_alias']), 'after': node_class(alias)}})
+    if state.get('ami_unpinned') and state['topology']['mng'] and version != state['initial_version']:
+        mng = next((c for c in changes if c['type'] == 'aws_eks_node_group'), None)
+        if mng is None and (not targets or any(t.startswith('module.eks') for t in targets)):
+            mng = {'address': MNG_ADDRESS, 'type': 'aws_eks_node_group', 'change': {
+                'actions': ['update'], 'before': {'release_version': state['ami_alias'],
+                'version': state['node_version']}, 'after': {'version': version}}}
+            changes.append(mng)
+        if mng is not None:
+            mng['change']['after'].pop('release_version', None)
+            mng['change']['after_unknown'] = {'release_version': True}
+    if state.get('tag_drift') and any(c['type'] == 'aws_eks_cluster' for c in changes):
+        cluster = next(c for c in changes if c['type'] == 'aws_eks_cluster')
+        cluster['change']['before']['tags'] = {'environment': 'external-edit'}
+        cluster['change']['after']['tags'] = {'environment': 'demo'}
     if state.get('unexpected_replace') and any(c['type'] == 'aws_eks_cluster' for c in changes):
         changes.append({'address': 'aws_launch_template.workers', 'type': 'aws_launch_template',
             'change': {'actions': ['delete', 'create'], 'before': {'name': 'demo-old'},
@@ -594,9 +616,14 @@ def apply_changes(changes, state, scenario):
                 'code': 'ConfigurationConflict', 'message': 'Conflicts found in aws-node DaemonSet configuration'}])
             effects.append('addon_update')
         elif entry['type'] == 'aws_eks_node_group':
+            if state.get('pdb_drain_block'):
+                state['drain_blocked'] = True
             state.setdefault('mng_release', state['ami_alias'])
-            state['mng_release_target'] = after['release_version']
-            state.update(ami_alias=after['release_version'], node_target=state['version'],
+            release = after.get('release_version') or 'unknown'
+            if release == 'unknown':
+                state['ami_unknown_reason'] = 'unpinned release_version resolved only at provider apply'
+            state['mng_release_target'] = release
+            state.update(ami_alias=release, node_target=state['version'],
                          mng_remaining=transitions['node_polls'])
             effects.extend(['node_replacement', 'mng_rollout'])
         elif entry['type'] == 'kubectl_manifest':
@@ -638,6 +665,14 @@ def terraform(args, state, scenario, project):
                 else 'Terraform v1.13.0'), 0
     if operation == 'init':
         return 'Terraform has been successfully initialized!', 0
+    if operation == 'plan' and state.get('phase6_auth_fail'):
+        audit = project / 'audit.log'
+        latest = audit.read_text().splitlines()[-1:] if audit.exists() else []
+        if state.get('phase6_auth_expired') or (latest and re.search(
+                r'\| PHASE6 \|[^\n]*\| ENTER \|', latest[0])):
+            state['phase6_auth_expired'] = True
+            state['last_error'] = 'Error: ExpiredToken: security token included in the request is expired'
+            return '', 1
     if operation == 'plan':
         data = plan(project, args, state, scenario)
         out = option(args, '-out')
