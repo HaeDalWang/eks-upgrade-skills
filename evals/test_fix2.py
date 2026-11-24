@@ -194,3 +194,16 @@ def test_eval_done_with_unanswered_rule_question_gets_answer(sandbox, monkeypatc
                            time.monotonic() + 10) == (2, 'done')
     assert commands[1][2] == '중단'
     assert [u['rule'] for u in read_jsonl(run / 'user.jsonl')] == ['replace']
+
+
+def test_drain_check_pairs_monitors_by_pid():
+    # Live run: DRAIN-P5 started (110), then DRAIN-P4 finished (114), then the Karpenter apply (117).
+    from evals.grading import drain_check
+    audit = [(110, '', 'DRAIN-P5', 'START', 'pid=2 DrainWatch started: scope=all'),
+             (114, '', 'DRAIN-P4', 'STOP', 'pid=1 DrainWatch finished: events=0')]
+    before = lambda call, rule, text='': [r for r in audit if r[0] <= call['audit_lines']
+                                          and r[2] == rule and text in r[4]]
+    apply = {'audit_lines': 117, 'effects': ['node_replacement']}
+    assert drain_check([(105, apply)], before) == []
+    audit.append((115, '', 'DRAIN-P5', 'STOP', 'pid=2 DrainWatch finished: events=0'))
+    assert drain_check([(105, apply)], before) == [105]

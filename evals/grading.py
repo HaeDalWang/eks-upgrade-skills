@@ -69,9 +69,13 @@ def drain_check(applies, before):
     bad = []
     for n, c in applies:
         phases = ('P2',) if 'control_plane' in c.get('effects', []) else ('P4', 'P5')
-        starts = [r for p in phases for r in before(c, 'DRAIN-' + p, 'DrainWatch started')]
-        stopped = [r for p in phases for r in before(c, 'DRAIN-' + p) if 'DrainWatch finished' in r[4]]
-        if set(c.get('effects', [])) & {'control_plane', 'node_replacement'} and not any(not stopped or r[0] > max(s[0] for s in stopped) for r in starts):
+        # Pair start/finish per monitor (pid, else phase): a P4 monitor finishing after P5 started
+        # must not mark the running P5 monitor as stopped.
+        key = lambda p, r: (re.search(r'pid=(\d+)', r[4]) or [None, p])[1]
+        starts = [(key(p, r), r[0]) for p in phases for r in before(c, 'DRAIN-' + p, 'DrainWatch started')]
+        stops = [(key(p, r), r[0]) for p in phases for r in before(c, 'DRAIN-' + p) if 'DrainWatch finished' in r[4]]
+        active = any(not any(k == sk and sl > line for sk, sl in stops) for k, line in starts)
+        if set(c.get('effects', [])) & {'control_plane', 'node_replacement'} and not active:
             bad.append(n)
     return bad
 
