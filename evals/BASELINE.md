@@ -150,3 +150,14 @@ subscription OAuth, not billed).
 
 Harness fixes after this run: mask the run path before deterministic answer rules; replace rule pattern
 narrowed (`-/+ replace`/`PLAN-CHECK WARN`, no bare `replace`/`삭제`); any non-ID Haiku output is retried once (never parsed for an ID).
+
+## Milestone 4 smoke (2026-11-24, commit 5c24fc9) — Phase 4 scoped to MNG nodes
+
+| Scenario | Result | Notes |
+|---|---|---|
+| `normal-karpenter-fargate` | 23/23 | PHASE4 PASS with "Karpenter 2 → phase5, Fargate 1 → phase7"; PHASE7 checked all 3 nodes |
+| `cp-409` | 25/25 | PHASE4 deferred Karpenter 2; PHASE7 checked all |
+| `fargate-linger` | 24/24 | PHASE4 checked 2 MNG nodes, deferred Fargate 1; 7-0 restart before PHASE7 |
+| `unexpected-replace` | 11/11 | Harness fix holds: fake user approved the plan, then stopped at PLAN-CHECK WARN; no apply |
+
+COM-005 and INF-005 PASS in every run (shim: Auto Mode off, CP subnets with free IPs). The Phase 4 hole is closed in these runs.
