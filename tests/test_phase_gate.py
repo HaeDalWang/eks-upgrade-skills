@@ -2323,6 +2323,20 @@ class TestGatePhase6:
         assert "PHASE6-TFSYNC" in content
         assert "FAIL" in content
 
+    def test_terraform_plan_failure_reports_stderr_reason(self, tmp_path, capsys):
+        """plan 실패 사유(stderr 마지막 줄)가 출력과 audit에 남는다 — 에이전트가 재실행으로 진단하지 않게."""
+        audit = str(tmp_path / "audit.log")
+        (tmp_path / "tf").mkdir()
+
+        def se(cmd, **kwargs):
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="",
+                                               stderr="Planning...\nError: ExpiredToken: token expired\n")
+        with unittest.mock.patch("subprocess.run", side_effect=se):
+            rc = phase_gate.gate_phase6(str(tmp_path / "tf"), audit)
+        assert rc == 1
+        assert "ExpiredToken" in capsys.readouterr().out
+        assert "ExpiredToken" in (tmp_path / "audit.log").read_text()
+
     def test_terraform_plan_exit_2_continues(self, tmp_path):
         """terraform plan exit 2 (changes present) → 계속 진행."""
         audit = str(tmp_path / "audit.log")

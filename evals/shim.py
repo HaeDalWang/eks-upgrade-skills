@@ -111,7 +111,8 @@ def eks(operation, args, state, scenario):
                    'status': 'UPDATING' if updating else state['status'],
                    'computeConfig': {'enabled': bool(state.get('auto_mode'))},
                    'resourcesVpcConfig': {'subnetIds': ['subnet-cp-a', 'subnet-cp-b']},
-                   'endpoint': 'https://eks.example.com', 'health': {'issues': []}}
+                   'endpoint': 'https://eks.example.com', 'health': {'issues': []},
+                   'tags': {'environment': 'external-edit' if state.get('tag_drift') else 'demo'}}
         return render({'cluster': cluster}, args), 0
     if operation == 'list-addons':
         return render({'addons': list(state['addons'])}, args), 0

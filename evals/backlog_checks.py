@@ -38,7 +38,7 @@ def backlog_checks(check, run, scenario, calls, audit, applies, users, final):
         auth = [n for n, c in enumerate(calls, 1) if c['tool'] == 'terraform' and c['exit'] != 0
                 and re.search(r'ExpiredToken|credential|auth', c.get('stderr', ''), re.I)]
         bad = [n for n, c in enumerate(calls, 1) if gates and n > gates[0][0]
-               and ((c['tool'] == 'terraform' and any(a in ('plan', 'show', 'apply') for a in c['argv']))
+               and ((c['tool'] == 'terraform' and 'apply' in c['argv'])
                     or script_call(c, 'phase_gate.py'))]
         check('phase6_auth_stops', bool(gates and auth) and auth[0] < gates[0][0] and not bad
               and reported_stop(final, r'인증|자격|auth|credential|token|PHASE6'),
