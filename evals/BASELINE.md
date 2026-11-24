@@ -149,4 +149,4 @@ no apply before Phase 0/approval, no apply of a WARN plan, CRITICAL stops. Displ
 subscription OAuth, not billed).
 
 Harness fixes after this run: mask the run path before deterministic answer rules; replace rule pattern
-narrowed (`-/+ replace`, no bare `replace`/`삭제`); Haiku output normalized to a single named answer ID, otherwise retried.
+narrowed (`-/+ replace`/`PLAN-CHECK WARN`, no bare `replace`/`삭제`); any non-ID Haiku output is retried once (never parsed for an ID).

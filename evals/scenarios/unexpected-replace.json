@@ -81,7 +81,7 @@
   "answer_rules": [
     {
       "id": "replace",
-      "pattern": "aws_launch_template|-/\\+ replace|recreate|destroy|재생성",
+      "pattern": "aws_launch_template|-/\\+ replace|PLAN-CHECK WARN|recreate|destroy|재생성",
       "answer_ids": [
         "stop-replace"
       ]

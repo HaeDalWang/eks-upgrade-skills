@@ -96,7 +96,7 @@ def test_unexpected_replace_cli_cp_plan_json_text_and_real_inf004(tmp_path):
     assert preflight(sb).returncode == 1
     assert any(r[2:4] == ('INF-004', 'FAIL') and r[4].startswith('Data Plane recreate')
                for r in records((sb[0] / 'project/audit.log').read_text().splitlines()))
-    user = runner.select_answer(sb[0], sb[2], None, sb[1], 0, 'replace 진행 승인?', 1)
+    user = runner.select_answer(sb[0], sb[2], None, sb[1], 0, 'PLAN-CHECK WARN: aws_launch_template.workers -/+ replace 진행 승인?', 1)
     assert user['answer_text'] == '중단' and not user['approval']
 
 
@@ -287,15 +287,3 @@ def test_replace_stop_rule_ignores_run_path_and_pod_deletion(tmp_path):
     user = runner.deterministic_answer(sb[0], sb[2], '| `aws_launch_template.workers` | -/+ replace |', 2)
     assert user['answer_text'] == '중단'
 
-
-@pytest.mark.parametrize('output,expected', [
-    ('approve-plan', 'approve-plan'),
-    # Live service-blip 2026-11-24T103208: Haiku explained its pick instead of printing the ID.
-    ('The matching entry is `approve-plan`, which asks for the approval word.', 'approve-plan'),
-    # Live phase0-transient-block 2026-11-24T100208: answer text instead of ID -> stays invalid (retry).
-    ('승인', '승인'),
-    ('NONE', 'NONE'),
-])
-def test_normalize_selector(output, expected):
-    sheet = [{'id': 'approve-plan'}, {'id': 'approve-warning'}, {'id': 'interview'}]
-    assert runner.normalize_selector(output, sheet) == expected

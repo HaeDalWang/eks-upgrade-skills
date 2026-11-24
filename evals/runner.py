@@ -224,16 +224,6 @@ def answer(last_message, sheet, selector):
             'approval': bool(entry and entry.get('approval')), 'ts': now()}
 
 
-def normalize_selector(output, sheet):
-    """Haiku sometimes explains its pick; accept it only when exactly one sheet ID is named."""
-    output = output.strip()
-    ids = [a['id'] for a in sheet]
-    if output in ids or output == 'NONE':
-        return output
-    named = [i for i in ids if re.search(r'(?<![\w-])' + re.escape(i) + r'(?![\w-])', output)]
-    return named[0] if len(named) == 1 else output
-
-
 def command(claude, message, model, session=None, fake_user=False):
     args = [str(claude), '-p', message, '--model', model, '--output-format', 'stream-json',
             '--verbose', '--permission-mode', 'bypassPermissions']
@@ -280,8 +270,10 @@ def select_answer(run, scenario, claude, env, deadline, last, turn):
         selection = result_events(selected)
         if code or not selection or selection[-1].get('is_error'):
             return None
-        selector = normalize_selector(selection[-1].get('result', ''), scenario['answers'])
+        selector = selection[-1].get('result', '').strip()
         user = answer(last, scenario['answers'], selector)
+        # Non-ID output (an explanation, or answer text like "승인") is retried, never parsed:
+        # extracting an ID from prose could inject an approval the selector did not mean.
         retrying = user['status'] != 'SENT' and attempt == 1
         append(run / 'user.jsonl', {**user, 'turn': turn + 1, 'attempt': attempt,
                                    'status': 'RETRY' if retrying else user['status']})
