@@ -224,6 +224,16 @@ def answer(last_message, sheet, selector):
             'approval': bool(entry and entry.get('approval')), 'ts': now()}
 
 
+def normalize_selector(output, sheet):
+    """Haiku sometimes explains its pick; accept it only when exactly one sheet ID is named."""
+    output = output.strip()
+    ids = [a['id'] for a in sheet]
+    if output in ids or output == 'NONE':
+        return output
+    named = [i for i in ids if re.search(r'(?<![\w-])' + re.escape(i) + r'(?![\w-])', output)]
+    return named[0] if len(named) == 1 else output
+
+
 def command(claude, message, model, session=None, fake_user=False):
     args = [str(claude), '-p', message, '--model', model, '--output-format', 'stream-json',
             '--verbose', '--permission-mode', 'bypassPermissions']
@@ -237,8 +247,10 @@ def command(claude, message, model, session=None, fake_user=False):
 
 def deterministic_answer(run, scenario, last, turn):
     # ponytail: scenario-specific question regexes; add structured question IDs if CLI supports them.
+    # Run paths contain the scenario name (e.g. "unexpected-replace"); mask them before matching.
+    text = last.replace(str(run.resolve()), '<RUN>').replace(str(run), '<RUN>')[-2500:]
     for rule in scenario.get('answer_rules', []):
-        if not re.search(rule['pattern'], last[-2500:], re.IGNORECASE):
+        if not re.search(rule['pattern'], text, re.IGNORECASE):
             continue
         sent = [json.loads(line) for line in (run / 'user.jsonl').read_text().splitlines()]
         count = sum(u.get('rule') == rule['id'] and u['status'] == 'SENT' for u in sent)
@@ -268,9 +280,9 @@ def select_answer(run, scenario, claude, env, deadline, last, turn):
         selection = result_events(selected)
         if code or not selection or selection[-1].get('is_error'):
             return None
-        selector = selection[-1].get('result', '').strip()
+        selector = normalize_selector(selection[-1].get('result', ''), scenario['answers'])
         user = answer(last, scenario['answers'], selector)
-        retrying = selector == 'NONE' and attempt == 1
+        retrying = user['status'] != 'SENT' and attempt == 1
         append(run / 'user.jsonl', {**user, 'turn': turn + 1, 'attempt': attempt,
                                    'status': 'RETRY' if retrying else user['status']})
         if not retrying:

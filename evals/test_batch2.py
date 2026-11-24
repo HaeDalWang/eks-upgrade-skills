@@ -275,3 +275,27 @@ def test_service_outage_report_ignores_stop_report_and_zero_pods():
     from evals.batch2_checks import REPORT_PATTERN
     text = '중단 보고서를 작성합니다. 비정상 Pod는 0개입니다. default/web 서비스 엔드포인트 감시에서 경고 0건'
     assert not re.search(REPORT_PATTERN, text.lower())
+
+
+def test_replace_stop_rule_ignores_run_path_and_pod_deletion(tmp_path):
+    # Live unexpected-replace 2026-11-24T103327 / T103640: the run path "unexpected-replace-..." in the
+    # plan-approval message triggered "중단".
+    sb = sandbox_for(tmp_path, 'unexpected-replace')
+    run = sb[0].resolve()
+    msg = f'계획서: `{run}/project/upgrade-plan.md`\nFargate Pod를 삭제한 뒤 진행합니다.\n승인 / 확인 / 시작'
+    assert runner.deterministic_answer(sb[0], sb[2], msg, 1) is None
+    user = runner.deterministic_answer(sb[0], sb[2], '| `aws_launch_template.workers` | -/+ replace |', 2)
+    assert user['answer_text'] == '중단'
+
+
+@pytest.mark.parametrize('output,expected', [
+    ('approve-plan', 'approve-plan'),
+    # Live service-blip 2026-11-24T103208: Haiku explained its pick instead of printing the ID.
+    ('The matching entry is `approve-plan`, which asks for the approval word.', 'approve-plan'),
+    # Live phase0-transient-block 2026-11-24T100208: answer text instead of ID -> stays invalid (retry).
+    ('승인', '승인'),
+    ('NONE', 'NONE'),
+])
+def test_normalize_selector(output, expected):
+    sheet = [{'id': 'approve-plan'}, {'id': 'approve-warning'}, {'id': 'interview'}]
+    assert runner.normalize_selector(output, sheet) == expected
