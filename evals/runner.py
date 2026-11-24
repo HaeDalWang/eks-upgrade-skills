@@ -235,15 +235,20 @@ def command(claude, message, model, session=None, fake_user=False):
     return args
 
 
-def deterministic_answer(run, scenario, last, turn):
+def rule_matches(run, scenario, last):
+    """(rule, times already answered) for each answer rule whose pattern matches the turn."""
     # ponytail: scenario-specific question regexes; add structured question IDs if CLI supports them.
     # Run paths contain the scenario name (e.g. "unexpected-replace"); mask them before matching.
     text = last.replace(str(run.resolve()), '<RUN>').replace(str(run), '<RUN>')[-2500:]
+    log = run / 'user.jsonl'
+    sent = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     for rule in scenario.get('answer_rules', []):
-        if not re.search(rule['pattern'], text, re.IGNORECASE):
-            continue
-        sent = [json.loads(line) for line in (run / 'user.jsonl').read_text().splitlines()]
-        count = sum(u.get('rule') == rule['id'] and u['status'] == 'SENT' for u in sent)
+        if re.search(rule['pattern'], text, re.IGNORECASE):
+            yield rule, sum(u.get('rule') == rule['id'] and u['status'] == 'SENT' for u in sent)
+
+
+def deterministic_answer(run, scenario, last, turn):
+    for rule, count in rule_matches(run, scenario, last):
         selector = rule['answer_ids'][min(count, len(rule['answer_ids']) - 1)]
         user = answer(last, scenario['answers'], selector)
         if user['status'] != 'SENT':
@@ -298,7 +303,10 @@ def converse(run, scenario, claude, model, env, deadline):
         if not session:
             return turns, 'missing_session_id'
         last = result.get('result', '')
-        if last.rstrip().splitlines()[-1:] == ['EVAL_DONE']:
+        # An agent can ask a question and still print EVAL_DONE; a rule-matched question that was never
+        # answered gets its answer instead of ending the run (answered rules end it, so no loop).
+        if last.rstrip().splitlines()[-1:] == ['EVAL_DONE'] and not any(
+                count == 0 for _, count in rule_matches(run, scenario, last)):
             return turns, 'done'
         if turn == scenario['max_turns']:
             break

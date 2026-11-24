@@ -174,3 +174,23 @@ def test_describe_addon_list_query_text(sandbox):
     out = cli(sandbox, 'aws', 'eks', 'describe-addon', '--cluster-name', 'demo-eks', '--addon-name',
               'vpc-cni', '--query', '[addon.addonName,addon.addonVersion,addon.status]', '--output', 'text').stdout
     assert out.split('\t')[0] == 'vpc-cni'
+
+
+def test_eval_done_with_unanswered_rule_question_gets_answer(sandbox, monkeypatch):
+    # Live unexpected-replace run: the agent asked about the replace and printed EVAL_DONE in the same turn.
+    run, env, scenario = sandbox
+    scenario = {**scenario, 'answers': [{'id': 'stop-replace', 'answer_text': '중단'}],
+                'answer_rules': [{'id': 'replace', 'pattern': 'PLAN-CHECK WARN', 'answer_ids': ['stop-replace']}]}
+    replies = iter(['PLAN-CHECK WARN — 어떻게 할까요?\nEVAL_DONE', '중단했습니다. PLAN-CHECK WARN\nEVAL_DONE'])
+    commands = []
+
+    def invoke(cmd, env, project, output, deadline):
+        commands.append(cmd)
+        output.write_text(json.dumps({'type': 'result', 'session_id': 'test', 'result': next(replies)}))
+        return 0
+
+    monkeypatch.setattr(runner, 'invoke', invoke)
+    assert runner.converse(run, scenario, Path('/fake/claude'), 'test', env,
+                           time.monotonic() + 10) == (2, 'done')
+    assert commands[1][2] == '중단'
+    assert [u['rule'] for u in read_jsonl(run / 'user.jsonl')] == ['replace']
