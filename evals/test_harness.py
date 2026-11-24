@@ -120,8 +120,9 @@ def test_plan_apply_transitions_and_all_current_phase_gates(sandbox):
     assert all(n['status']['nodeInfo']['kubeletVersion'] == 'v1.33.0' for n in old_nodes)
     update_tfvars(run, 'bottlerocket@1.46.0', 'bottlerocket@1.47.0')
     cli(sandbox, 'terraform', 'apply', '-auto-approve')
-    for _ in range(scenario['transitions']['node_polls'] + 1):
-        nodes = json.loads(cli(sandbox, 'kubectl', 'get', 'nodes', '-o', 'json').stdout)['items']
+    for _ in range(scenario['transitions']['node_polls']):  # NodeClaim reads advance the rollout
+        cli(sandbox, 'kubectl', 'get', 'nodeclaims', '-o', 'json')
+    nodes = json.loads(cli(sandbox, 'kubectl', 'get', 'nodes', '-o', 'json').stdout)['items']
     assert [n['metadata']['name'] for n in nodes[:2]] == ['worker-a-new', 'worker-b-new']
     assert nodes[2]['status']['nodeInfo']['kubeletVersion'] == 'v1.33.0'
     cli(sandbox, 'kubectl', 'rollout', 'restart', 'deployment/coredns', '-n', 'kube-system')

@@ -82,6 +82,9 @@ kubectl get nodes -l karpenter.sh/nodepool \
 
 ## 5-2. Phase 5 gate (always)
 
+During a rollout, the gate returns exit 2 `NEXT: RETRY`; rerun every 30s.
+After 30 minutes from the last `APPLY-GUARD | PASS`, it FAILs.
+
 ```bash
 python3 scripts/phase_gate.py phase5 \
   --target-version "${TARGET_VERSION}" \

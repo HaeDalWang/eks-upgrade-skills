@@ -118,6 +118,9 @@ kubectl get nodes \
 
 ## 4-6. Phase 4 gate (always)
 
+During a rollout, the gate returns exit 2 `NEXT: RETRY`; rerun every 30s.
+After 30 minutes from the last `APPLY-GUARD | PASS`, it FAILs.
+
 ```bash
 python3 scripts/phase_gate.py phase4 \
   --cluster-name "${CLUSTER_NAME}" \

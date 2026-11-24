@@ -19,10 +19,14 @@ def option(args, *names, default=None):
     return default
 
 
-def tick(state, key, finish):
+def tick(state, key, finish, early=False):
+    """early: the poll that reaches 0 already finishes the change but still reports in progress, so old
+    nodes are never visible without an in-progress signal (node rollouts; real AWS/Karpenter keep it)."""
     remaining = state.get(key, 0)
     if remaining:
         state[key] = remaining - 1
+        if early and remaining == 1:
+            state.update(finish)
         return True
     state.update(finish)
     return False
@@ -121,10 +125,14 @@ def eks(operation, args, state, scenario):
     if operation == 'list-nodegroups':
         return render({'nodegroups': ['demo-system'] if scenario['topology']['mng'] else []}, args), 0
     if operation == 'describe-nodegroup':
+        # The node group reports its previous version until the update ends; nodes may already be new.
+        version, release = state['node_version'], state.get('mng_release', state['ami_alias'])
         updating = mng_updating(state)
+        if not updating:
+            version, release = state['node_version'], state.get('mng_release', state['ami_alias'])
         return render({'nodegroup': {'nodegroupName': option(args, '--nodegroup-name'),
-            'status': 'UPDATING' if updating else 'ACTIVE', 'version': state['node_version'],
-            'releaseVersion': state.get('mng_release', state['ami_alias']),
+            'status': 'UPDATING' if updating else 'ACTIVE', 'version': version,
+            'releaseVersion': release,
             'amiType': 'AL2023_x86_64_STANDARD', 'subnets': ['subnet-demo'], 'health': {'issues': []}}}, args), 0
     if operation == 'list-insights':
         return render({'insights': [{'id': 'upgrade-readiness', 'name': 'Upgrade readiness',
@@ -153,7 +161,7 @@ def eks(operation, args, state, scenario):
 def mng_updating(state):
     return tick(state, 'mng_remaining', {
         'node_version': state.get('node_target', state['node_version']),
-        'mng_release': state.get('mng_release_target', state['ami_alias'])})
+        'mng_release': state.get('mng_release_target', state['ami_alias'])}, early=True)
 
 
 def describe_addon(args, state, scenario):
@@ -244,7 +252,8 @@ def resources(kind, state):
     if kind == 'nodeclaims':
         return [{'kind': 'NodeClaim', 'metadata': {'name': 'claim-' + x + suffix},
             'status': {'nodeName': nodes[i]['metadata']['name'], 'conditions': [
-                {'type': 'Ready', 'status': 'True'}, {'type': 'Drifted', 'status': 'False'}]}}
+                {'type': 'Ready', 'status': 'True'},
+                {'type': 'Drifted', 'status': 'True' if state.get('node_remaining', 0) > 0 else 'False'}]}}
             for i, x in enumerate(('a', 'b'))]
     if kind == 'nodepool':
         return [{'kind': 'NodePool', 'metadata': {'name': 'default'}, 'spec': {
@@ -341,6 +350,8 @@ def kformat(items, args, named):
         return jsonpath_range(path, items)
     if fmt not in ('table', 'wide') and not fmt.startswith('custom-columns='):
         raise ValueError('kubectl output')
+    if not items and args[1] in ('events', 'event'):
+        return 'No resources found.'
     labels = '--show-labels' in args
     rows = [] if '--no-headers' in args else ['NAME\tSTATUS\tVERSION\tNODE' + ('\tLABELS' if labels else '')]
     for item in items:
@@ -357,7 +368,7 @@ def kformat(items, args, named):
 def kubectl_positionals(args):
     values, skip = [], False
     valued = {'-n', '--namespace', '-o', '--output', '-l', '--selector', '--field-selector',
-              '-L', '--label-columns'}
+              '-L', '--label-columns', '--sort-by'}
     for arg in args:
         if skip:
             skip = False
@@ -420,9 +431,17 @@ def kubectl(args, state, scenario):
     name = embedded_name or (positionals[1] if len(positionals) > 1 else '')
     if kind in ('nodeclaims', 'nodepool', 'ec2nodeclasses') and not scenario['topology']['karpenter']:
         return '', 1
-    if kind in ('nodes', 'nodeclaims') and 'node_remaining' in state:
-        tick(state, 'node_remaining', {'node_version': state['node_target']})
+    rolling = False
+    # Only the NodeClaim read (the rollout signal) advances the Karpenter rollout; see tick(early=True).
+    if kind == 'nodeclaims' and 'node_remaining' in state:
+        rolling = tick(state, 'node_remaining', {'node_version': state['node_target']}, early=True)
     items = filtered(resources(kind, state), args, name)
+    if kind == 'nodeclaims' and rolling:
+        # The last in-progress poll decrements the counter to zero, but has not finished.
+        for item in items:
+            for condition in item['status']['conditions']:
+                if condition['type'] == 'Drifted':
+                    condition['status'] = 'True'
     if name and not items:
         return '', 1
     return kformat(items, args, bool(name)), 0
@@ -556,6 +575,18 @@ def cp_conflict():
             'Cannot VersionUpdate because cluster demo-eks currently has update eval-update in progress')
 
 
+def plan_text(data):
+    lines = [(f"  # {c['address']} must be replaced\n-/+ resource \"{c['type']}\" "
+              if c['change']['actions'] == ['delete', 'create'] else
+              f"  # {c['address']} will be updated in-place\n  ~ {c['type']} ") +
+             json.dumps(c['change']) for c in data['resource_changes']]
+    replaces = sum(c['change']['actions'] == ['delete', 'create'] for c in data['resource_changes'])
+    text = '\n'.join(lines) + f"\nPlan: {replaces} to add, {len(lines) - replaces} to change, {replaces} to destroy."
+    if not lines:
+        text = 'No changes. Your infrastructure matches the configuration.'
+    return text
+
+
 def terraform(args, state, scenario, project):
     operation = args[0]
     if operation in ('version', '-version', '--version'):
@@ -569,14 +600,8 @@ def terraform(args, state, scenario, project):
         if out:
             (project / out).write_text(json.dumps(data))
         state['last_plan'] = data
-        lines = [(f"  # {c['address']} must be replaced\n-/+ resource \"{c['type']}\" "
-                  if c['change']['actions'] == ['delete', 'create'] else
-                  f"  # {c['address']} will be updated in-place\n  ~ {c['type']} ") +
-                 json.dumps(c['change']) for c in data['resource_changes']]
-        replaces = sum(c['change']['actions'] == ['delete', 'create'] for c in data['resource_changes'])
-        text = '\n'.join(lines) + f"\nPlan: {replaces} to add, {len(lines) - replaces} to change, {replaces} to destroy."
-        if not lines:
-            text = 'No changes. Your infrastructure matches the configuration.'
+        lines = data['resource_changes']
+        text = plan_text(data)
         return text, 2 if lines and '-detailed-exitcode' in args else 0
     if args[:2] == ['state', 'list']:
         addresses = ['module.eks.aws_eks_cluster.this[0]']
@@ -587,10 +612,10 @@ def terraform(args, state, scenario, project):
         if state.get('unexpected_replace'):
             addresses.append('aws_launch_template.workers')
         return '\n'.join(addresses), 0
-    if operation == 'show' and '-json' in args:
+    if operation == 'show':
         paths = [v for v in args[1:] if not v.startswith('-')]
         data = json.loads((project / paths[0]).read_text()) if paths else state.get('last_plan', {})
-        return json.dumps(data), 0
+        return (json.dumps(data) if '-json' in args else plan_text(data)), 0
     if operation == 'apply':
         if scenario['transitions'].get('cp_409') and state['status'] == 'UPDATING':
             state['last_error'] = cp_conflict()

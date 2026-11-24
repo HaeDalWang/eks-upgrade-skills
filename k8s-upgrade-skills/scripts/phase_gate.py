@@ -53,6 +53,7 @@ POD_BLOCKING_SEC  = 300   # 생성 후 이 시간 초과 → BLOCKING (즉시 �
 
 # FailedEvict 이벤트 시간 필터 (초)
 FAILED_EVICT_WINDOW_SEC = 600  # 최근 10분 이내 이벤트만 유효
+ROLLOUT_RETRY_SEC = 1800  # 마지막 APPLY-GUARD PASS부터 최대 30분
 
 
 def gate_next(exit_code: int, rows: list) -> str:
@@ -63,6 +64,7 @@ def gate_next(exit_code: int, rows: list) -> str:
     phase3 Add-on UPDATING             RETRY
     phase4 STALE Pod                   RUN delete-stale-pods <ns/pod ...>
     phase4 TRANSIENT Pod               RETRY
+    phase4/5 ROLLOUT                   RETRY (30s)
     phase7 sub-gate WARN               inherited action above; else ASK_USER
 
     RUN emits only the fixed stale-Pod kind; no current gate requests a restart.
@@ -77,6 +79,8 @@ def gate_next(exit_code: int, rows: list) -> str:
                           stale[-1]["detail"])
         if pods:
             return "NEXT: RUN delete-stale-pods " + " ".join(pods)
+    if any(row["detail"].startswith("ROLLOUT ") for row in warnings):
+        return "NEXT: RETRY wait 30s for the node rollout, then rerun gate"
     if any(row["rule_id"] == "PHASE3-ADDON" or
            row["detail"].startswith("TRANSIENT Pod ") for row in warnings):
         return "NEXT: RETRY wait for UPDATING add-ons or transient Pods, then rerun gate"
@@ -430,6 +434,45 @@ def classify_pods(pods_json: dict, nodes_json: dict, now=None) -> PodClassificat
     return result
 
 
+def rollout_result(audit_log: str, in_progress: bool, detail: str) -> tuple:
+    """Only verified rollout signals with a recent apply may soften a node FAIL."""
+    if not in_progress:
+        return 1, detail
+    path = Path(audit_log)
+    rows = [row for line in path.read_text(encoding="utf-8").splitlines()
+            if (row := parse_audit_line(line))
+            and row["rule_id"] == "APPLY-GUARD" and row["result"] == "PASS"] if path.exists() else []
+    if not rows:
+        return 1, detail + "; apply time unknown: no APPLY-GUARD PASS"
+    try:
+        applied = datetime.fromisoformat(rows[-1]["timestamp"].replace("Z", "+00:00"))
+        elapsed = (datetime.now(timezone.utc) - applied).total_seconds()
+    except (ValueError, TypeError):
+        return 1, detail + "; apply time unknown: invalid APPLY-GUARD timestamp"
+    if elapsed < 0:
+        return 1, detail + "; apply time unknown: future APPLY-GUARD timestamp"
+    if elapsed > ROLLOUT_RETRY_SEC:
+        return 1, detail + "; rollout exceeded 30 minutes from APPLY-GUARD PASS"
+    return 2, "ROLLOUT " + detail
+
+
+def mng_rollout_in_progress(cluster_name: str) -> bool:
+    """Use the same inherited AWS authentication/region as other EKS calls."""
+    r = run_cmd(["aws", "eks", "list-nodegroups", "--cluster-name", cluster_name, "--output", "json"])
+    if r.returncode != 0:
+        return False
+    try:
+        groups = json.loads(r.stdout).get("nodegroups", [])
+        for name in groups:
+            r = run_cmd(["aws", "eks", "describe-nodegroup", "--cluster-name", cluster_name,
+                         "--nodegroup-name", name, "--output", "json"])
+            if r.returncode == 0 and json.loads(r.stdout).get("nodegroup", {}).get("status") == "UPDATING":
+                return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return False
+
+
 @phase_boundary(4)
 def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
                 node_scope: str = "all") -> int:
@@ -473,6 +516,7 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
     version_pattern = re.compile(rf"v{re.escape(target_version)}\.")
     bad_nodes = []
     checked = 0
+    bad_other_nodes = False
     excluded_karpenter = 0
     excluded_fargate = 0
     for node in nodes:
@@ -498,15 +542,24 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
             bad_nodes.append(f"{name}(version={kubelet_ver})")
         elif ready != "True":
             bad_nodes.append(f"{name}(NotReady)")
+        else:
+            continue
+        if ("karpenter.sh/nodepool" in labels
+                or labels.get("eks.amazonaws.com/compute-type") == "fargate"):
+            bad_other_nodes = True
 
     scope_detail = (f"; Karpenter {excluded_karpenter} → phase5, Fargate {excluded_fargate} → phase7"
                     if node_scope == "mng" else "")
     if bad_nodes:
         detail = f"비정상 노드: {', '.join(bad_nodes)}{scope_detail}"
-        audit_write("PHASE4-DATAPLANE", "FAIL", detail)
-        print(f"{RED}❌ PHASE4-DATAPLANE FAIL{NC}  {detail}")
-        audit_flush(audit_log)
-        return 1
+        exit_code, detail = rollout_result(
+            audit_log, not bad_other_nodes and mng_rollout_in_progress(cluster_name), detail)
+        result = "WARN" if exit_code == 2 else "FAIL"
+        audit_write("PHASE4-DATAPLANE", result, detail)
+        print(f"{YELLOW if exit_code == 2 else RED}PHASE4-DATAPLANE {result}{NC}  {detail}")
+        if exit_code == 1:
+            audit_flush(audit_log)
+            return 1
     else:
         detail = f"검사 대상 노드 v{target_version}.x + Ready ({checked}개){scope_detail}"
         audit_write("PHASE4-DATAPLANE", "PASS", detail)
@@ -598,7 +651,7 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
 
 @phase_boundary(5)
 def gate_phase5(target_version: str, audit_log: str) -> int:
-    """Phase 5: Karpenter 노드 검증. 반환: exit code (0/1)."""
+    """Phase 5: Karpenter 노드 검증. 반환: exit code (0/1/2)."""
     reset_gate()
     audit_init("", "", target_version)
 
@@ -656,10 +709,22 @@ def gate_phase5(target_version: str, audit_log: str) -> int:
 
     if bad_nodes:
         detail = f"비정상 Karpenter 노드: {', '.join(bad_nodes)}"
-        audit_write("PHASE5-KARPENTER", "FAIL", detail)
-        print(f"{RED}❌ PHASE5-KARPENTER FAIL{NC}  {detail}")
+        r = run_cmd(["kubectl", "get", "nodeclaims", "-o", "json"])
+        drifted = False
+        if r.returncode == 0:
+            try:
+                claims = json.loads(r.stdout).get("items", [])
+                drifted = any(c.get("type") == "Drifted" and c.get("status") == "True"
+                              for claim in claims
+                              for c in claim.get("status", {}).get("conditions", []))
+            except (ValueError, AttributeError, TypeError):
+                pass  # No verified rollout signal: retain the node FAIL.
+        exit_code, detail = rollout_result(audit_log, drifted, detail)
+        result = "WARN" if exit_code == 2 else "FAIL"
+        audit_write("PHASE5-KARPENTER", result, detail)
+        print(f"{YELLOW if exit_code == 2 else RED}PHASE5-KARPENTER {result}{NC}  {detail}")
         audit_flush(audit_log)
-        return 1
+        return exit_code
     else:
         audit_write("PHASE5-KARPENTER", "PASS", f"모든 Karpenter 노드 v{target_version}.x + Ready ({len(nodes)}개)")
         print(f"{GREEN}✅ PHASE5-KARPENTER PASS{NC}  모든 Karpenter 노드 v{target_version}.x + Ready ({len(nodes)}개)")
@@ -802,6 +867,8 @@ def gate_phase7(cluster_name: str, target_version: str, audit_log: str) -> int:
     def _run_sub_gate(name, gate_fn, *args, **kwargs):
         with tempfile.TemporaryDirectory() as tmpdir:
             sub_audit = os.path.join(tmpdir, "sub_audit.log")
+            history = _Path(audit_log).read_text(encoding="utf-8") if name == "phase4" else ""
+            _Path(sub_audit).write_text(history, encoding="utf-8")
             rc = gate_fn(*args, sub_audit, **kwargs)
             # Append sub-gate audit to main audit log
             sub_path = _Path(sub_audit)
@@ -809,7 +876,7 @@ def gate_phase7(cluster_name: str, target_version: str, audit_log: str) -> int:
                 main_path = _Path(audit_log)
                 with main_path.open("a", encoding="utf-8") as f:
                     f.write(f"\n# --- Phase 7: sub-gate {name} ---\n")
-                    f.write(sub_path.read_text(encoding="utf-8"))
+                    f.write(sub_path.read_text(encoding="utf-8")[len(history):])
             return rc
 
     sub_results["phase2"] = _run_sub_gate("phase2", gate_phase2, cluster_name, target_version)

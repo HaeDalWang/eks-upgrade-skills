@@ -104,10 +104,13 @@ def test_mng_rolling_cli_targeted_ami_plan_nodes_and_phase5_skip(tmp_path):
     plan = json.loads(cli(sb, 'terraform', 'show', '-json', 'mng.plan').stdout)
     assert [c['type'] for c in plan['resource_changes']] == ['aws_eks_node_group']
     cli(sb, 'terraform', 'apply', 'mng.plan')
-    for _ in range(scenario['transitions']['node_polls']):
+    polls = scenario['transitions']['node_polls']
+    for i in range(polls):
         ng = json.loads(cli(sb, 'aws', 'eks', 'describe-nodegroup', '--nodegroup-name', 'demo-system').stdout)
         assert ng['nodegroup']['status'] == 'UPDATING'
-        assert json.loads(cli(sb, 'kubectl', 'get', 'nodes', '-o', 'json').stdout)['items'] == old
+        # Old nodes are only visible while a later read still reports UPDATING (tick early=True).
+        nodes = json.loads(cli(sb, 'kubectl', 'get', 'nodes', '-o', 'json').stdout)['items']
+        assert (nodes == old) == (i < polls - 1)
     ng = json.loads(cli(sb, 'aws', 'eks', 'describe-nodegroup', '--nodegroup-name', 'demo-system').stdout)
     assert ng['nodegroup']['status'] == 'ACTIVE' and ng['nodegroup']['version'] == '1.34'
     new = json.loads(cli(sb, 'kubectl', 'get', 'nodes', '-o', 'json').stdout)['items']

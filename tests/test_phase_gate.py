@@ -3181,3 +3181,126 @@ class TestPhase4NodeScope:
              unittest.mock.patch("phase_gate.gate_phase3", return_value=0), \
              unittest.mock.patch("phase_gate.run_cmd", side_effect=run):
             assert phase_gate.gate_phase7("demo", "1.34", str(tmp_path / "audit.log")) == 1
+
+
+class TestRolloutRetry:
+    @pytest.fixture
+    def rollout(self, tmp_path, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+
+        audit = tmp_path / "audit.log"
+        now = datetime.now(timezone.utc)
+
+        def seed(age):
+            # Cumulative history from another target must not override the last apply.
+            old = (now - timedelta(days=2)).isoformat()
+            text = f"# Target version: 1.33\n{old} | APPLY-GUARD | PASS | prior target\n"
+            if age is not None:
+                applied = (now - timedelta(seconds=age)).isoformat()
+                text += f"# Target version: 1.35\n{applied} | APPLY-GUARD | - | PASS | current apply\n"
+                text += f"{old} | APPLY-GUARD | CRITICAL | FAIL | later failed guard\n"
+            else:
+                text = "# No apply evidence\n"
+            audit.write_text(text)
+
+        def mock_commands(phase, signal=True, events=None, blocking=False, ready="True"):
+            node = TestGatePhase4NodeAndEvents._make_node("worker", "v1.34.0", ready)
+            claims = {"items": [{"status": {"conditions": [
+                {"type": "Drifted", "status": "True" if signal else "False"}]}}]}
+
+            def run(args, **kwargs):
+                if args[:3] == ["aws", "eks", "list-nodegroups"]:
+                    data = {"nodegroups": ["system"]}
+                elif args[:3] == ["aws", "eks", "describe-nodegroup"]:
+                    assert args[args.index("--cluster-name") + 1] == "demo"
+                    data = {"nodegroup": {"status": "UPDATING" if signal else "ACTIVE"}}
+                elif args[:3] == ["kubectl", "get", "nodes"]:
+                    data = {"items": [node]}
+                elif args[:3] == ["kubectl", "get", "nodeclaims"]:
+                    data = claims
+                elif args[:3] == ["kubectl", "get", "crd"]:
+                    data = {}
+                elif args[:3] == ["kubectl", "get", "events"]:
+                    data = {"items": events or []}
+                elif args[:3] == ["kubectl", "get", "pods"]:
+                    data = {"items": []}
+                else:
+                    raise AssertionError(args)
+                return subprocess.CompletedProcess(args, 0, json.dumps(data), "")
+
+            monkeypatch.setattr(phase_gate, "run_cmd", run)
+            if blocking:
+                monkeypatch.setattr(phase_gate, "classify_pods", lambda *a: phase_gate.PodClassification(
+                    blocking=[{"ns": "default", "name": "broken"}]))
+
+        return audit, seed, mock_commands
+
+    @pytest.mark.parametrize("phase", [4, 5])
+    @pytest.mark.parametrize("age,signal,expected", [
+        pytest.param(30, True, 2, id="recent_apply_retries"),
+        pytest.param(1801, True, 1, id="expired_apply_fails"),
+        pytest.param(30, False, 1, id="no_rollout_signal_fails"),
+        pytest.param(None, True, 1, id="no_apply_fails"),
+    ])
+    def test_old_nodes_rollout_retry(self, rollout, capsys, phase, age, signal, expected):
+        audit, seed, mock_commands = rollout
+        seed(age)
+        mock_commands(phase, signal)
+        if phase == 4:
+            rc = phase_gate.gate_phase4("demo", "1.35", str(audit), node_scope="mng")
+        else:
+            rc = phase_gate.gate_phase5("1.35", str(audit))
+        assert rc == expected
+        output = capsys.readouterr().out
+        if expected == 2:
+            assert output.splitlines()[-1] == "NEXT: RETRY wait 30s for the node rollout, then rerun gate"
+            assert "| WARN | ROLLOUT " in audit.read_text()
+        else:
+            assert output.splitlines()[-1].startswith("NEXT: STOP")
+        if age == 1801:
+            assert "rollout exceeded 30 minutes" in audit.read_text()
+
+    @pytest.mark.parametrize("blocking", [False, True], ids=["failed_evict", "blocking_pod"])
+    def test_phase4_failure_overrides_rollout_retry(self, rollout, capsys, blocking):
+        audit, seed, mock_commands = rollout
+        seed(30)
+        mock_commands(4, events=[] if blocking else [{"message": "cannot evict"}], blocking=blocking)
+        assert phase_gate.gate_phase4("demo", "1.35", str(audit)) == 1
+        assert capsys.readouterr().out.splitlines()[-1].startswith("NEXT: STOP")
+
+    @pytest.mark.parametrize("phase", [4, 5])
+    def test_not_ready_nodes_rollout_retry(self, rollout, phase):
+        audit, seed, mock_commands = rollout
+        seed(30)
+        mock_commands(phase, ready="False")
+        if phase == 4:
+            rc = phase_gate.gate_phase4("demo", "1.34", str(audit))
+        else:
+            rc = phase_gate.gate_phase5("1.34", str(audit))
+        assert rc == 2
+
+    @pytest.mark.parametrize("stamp", ["invalid", "2026-01-01T00:00:00", "2999-01-01T00:00:00Z"])
+    def test_invalid_apply_time_fails_closed(self, rollout, stamp):
+        audit, _, mock_commands = rollout
+        audit.write_text(f"{stamp} | APPLY-GUARD | PASS | invalid time\n")
+        mock_commands(5)
+        assert phase_gate.gate_phase5("1.35", str(audit)) == 1
+        assert "apply time unknown" in audit.read_text()
+
+    def test_phase7_inherits_rollout_retry(self, rollout, monkeypatch, capsys):
+        audit, seed, mock_commands = rollout
+        seed(30)
+        mock_commands(4)
+        node_run = phase_gate.run_cmd
+
+        def run(args, **kwargs):
+            if args[:3] == ["aws", "eks", "list-insights"]:
+                return subprocess.CompletedProcess(args, 0, '{"insights": []}', "")
+            return node_run(args, **kwargs)
+
+        monkeypatch.setattr(phase_gate, "run_cmd", run)
+        monkeypatch.setattr(phase_gate, "gate_phase2", lambda *a: 0)
+        monkeypatch.setattr(phase_gate, "gate_phase3", lambda *a: 0)
+        assert phase_gate.gate_phase7("demo", "1.35", str(audit)) == 2
+        assert capsys.readouterr().out.splitlines()[-1].startswith("NEXT: RETRY wait 30s")
+        assert audit.read_text().count("current apply") == 1
