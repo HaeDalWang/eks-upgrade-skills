@@ -192,3 +192,10 @@ cost $0.30–2.59 per run.
 | `phase0-transient-block` | 23/23 | PHASE5 `ROLLOUT` WARN ×1 → RETRY → PASS |
 
 The three M4-full failures (gate during rollout → STOP) are closed; each run exercised the new RETRY path.
+
+## A: PV-AZ + Add-on ConfigurationConflict (47b56f8, live ×1)
+
+| scenario | result | note |
+|---|---|---|
+| pv-az-gap | 11/11 | phase4 `PV-AZ` FAIL → stop + FAILED report |
+| addon-conflict | 11/11 | 1st run 10/11: discover risk asked before approval, answer sheet had no reply → pre-apply stop (harness). Answer sheet now accepts NONE; rerun: phase3 `CONFLICT` FAIL → stop + report |
