@@ -161,3 +161,24 @@ narrowed (`-/+ replace`/`PLAN-CHECK WARN`, no bare `replace`/`삭제`); any non-
 | `unexpected-replace` | 11/11 | Harness fix holds: fake user approved the plan, then stopped at PLAN-CHECK WARN; no apply |
 
 COM-005 and INF-005 PASS in every run (shim: Auto Mode off, CP subnets with free IPs). The Phase 4 hole is closed in these runs.
+
+## Milestone 4 full (2026-11-24, commit f7b8ed0) — 10 scenarios × 3
+
+| Scenario | Result | Notes |
+|---|---|---|
+| `normal-karpenter-fargate` | 23/23 ×3 | run 2 first graded 22/23: `drain_started_before_apply` grader false positive (P4 monitor finishing after P5 started was read as "no monitor"); fixed in 1cd5be7 (pair by pid), regraded 23/23 |
+| `cp-409` | 25/25 ×3 | |
+| `addon-sequential` | 24/24 ×2, 20/24 | run 1: Phase 5 gate ran right after the Karpenter apply, nodes still v1.33 → exit 1 STOP |
+| `mng-rolling` | 25/25 ×3 | |
+| `fargate-linger` | 24/24 ×2, 17/24 | run 2: Phase 4 gate ran while the MNG was still `UPDATING` → exit 1 STOP |
+| `ok-approval` | 23/23 ×3 | |
+| `phase0-critical` | 11/11 ×3 | |
+| `phase0-transient-block` | 23/23 ×2, 20/23 | run 2: same as addon-sequential run 1 (Phase 5 during Karpenter replacement) |
+| `service-blip` | 25/25 ×2, 24/25 | run 3: shim gap `kubectl get events --sort-by=.lastTimestamp` (harness) |
+| `unexpected-replace` | 11/11 ×2, 10/11 | run 1: shim gap `terraform show cp.tfplan` without `-json` (harness) |
+
+Skill hole (3/30): a node gate run while the rollout is still in progress returns exit 1 STOP instead of
+waiting. All three stopped safely with a failure report. Fix (user decision 2026-11-24): the gate returns
+exit 2 `NEXT: RETRY` while the rollout is in progress (Karpenter: drifted NodeClaims; MNG: node group
+`UPDATING`), bounded by a time limit, and FAIL otherwise. Safety assertions held in every run. Displayed
+cost $0.30–2.59 per run.
