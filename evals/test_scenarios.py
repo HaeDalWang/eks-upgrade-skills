@@ -225,14 +225,15 @@ def test_batch1_grading_identical_to_8b75581_snapshot(tmp_path, name):
 
 
 @pytest.mark.parametrize("name", [p.stem for p in sorted(SCENARIO.parent.glob("*.json"))])
-def test_new_preflight_rules_pass_in_existing_scenarios(tmp_path, name):
+def test_preflight_rules_match_scenario_state(tmp_path, name):
     sb = sandbox_for(tmp_path, name)
     result = script(sb, 'gate_check.py', '--cluster-name', 'demo-eks',
                     '--current-version', '1.33', '--target-version', '1.34')
     assert result.returncode in (0, 1, 2), result.stdout + result.stderr
     audit = records((sb[0] / 'project/audit.log').read_text().splitlines())
     for rule in ('COM-005', 'INF-005'):
-        assert any(r[2:4] == (rule, 'PASS') for r in audit), result.stdout
+        expected = 'FAIL' if rule == 'COM-005' and sb[2]['initial_state'].get('auto_mode') else 'PASS'
+        assert any(r[2:4] == (rule, expected) for r in audit), result.stdout
     assert not any('shim: unsupported' in c['stderr'] for c in read_jsonl(sb[0] / 'calls.jsonl'))
 
 

@@ -91,6 +91,8 @@ def generalize_project(project, scenario):
             text = text.replace('  eks_managed_node_groups = {',
                 '  fargate_profiles = { system = { selectors = [{ namespace = "kube-system" }] } }\n'
                 '  eks_managed_node_groups = {', 1)
+        if path.name == 'eks.tf' and scenario['initial_state'].get('ami_unpinned'):
+            text = re.sub(r'^.*release_version\s*=.*\n', '', text, flags=re.M)
         path.write_text(text)
 
 
@@ -128,7 +130,7 @@ def prepare(run, scenario, claude):
     return env
 
 
-def invoke(command, env, project, output, deadline):
+def invoke(command, env, project, output, deadline, restart_check=None):
     """Kill the whole turn's process group on timeout, including background monitors."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -137,7 +139,7 @@ def invoke(command, env, project, output, deadline):
         process = subprocess.Popen(command, cwd=project, env=env, stdin=subprocess.DEVNULL,
                                    stdout=stream, stderr=errors, start_new_session=True)
         try:
-            return wait_turn(process, output, deadline)
+            return wait_turn(process, output, deadline, restart_check=restart_check)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGTERM)
             try:
@@ -172,12 +174,14 @@ def turn_finished(output):
     return bool(events) and events[-1].get('type') == 'result'
 
 
-def wait_turn(process, output, deadline, idle=None):
+def wait_turn(process, output, deadline, idle=None, restart_check=None):
     # A -p process stays alive while its background monitors run, even after it asked the user.
     # ponytail: fixed idle window after a result; use --input-format stream-json to answer a live process.
     idle = IDLE_AFTER_RESULT if idle is None else idle
     waiting_since = None
     while True:
+        if restart_check and restart_check(process):
+            return 0
         code = process.poll()
         if code is not None:
             return code
@@ -197,6 +201,40 @@ def wait_turn(process, output, deadline, idle=None):
             append(output.parent.parent / 'turn-cuts.jsonl', {'turn': output.name, 'ts': now(), 'idle': idle})
             return 0
         time.sleep(1)
+
+
+def interrupt_for_restart(run, pattern, turn, session, output, process):
+    audit = run / 'project/audit.log'
+    if not audit.exists() or not re.search(pattern, audit.read_text(), re.M):
+        return False
+    # Same process-group boundary as run_live's final cleanup; detached children are unknown.
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+    left_running = []
+    for group in GROUPS + [process.pid]:
+        try:
+            os.killpg(group, 0)
+            left_running.append(group)
+        except ProcessLookupError:
+            pass
+    events = read_events(output)
+    previous = next((e['session_id'] for e in reversed(events) if e.get('session_id')), session)
+    (run / 'restart.json').write_text(json.dumps({
+        'turn': turn + 1, 'after_turn': turn, 'ts': now(), 'interrupted': True,
+        'process_group': process.pid, 'process_returncode': process.returncode,
+        'process_groups_left_running': left_running,
+        'detached_background_processes': 'unknown: outside runner process groups',
+        'calls_before': len((run / 'calls.jsonl').read_text().splitlines()),
+        'audit_lines': len(audit.read_text().splitlines()),
+        'previous_session': previous}, indent=2) + '\n')
+    return True
 
 
 def accounting(run, started, turns, stop):
@@ -288,11 +326,22 @@ def select_answer(run, scenario, claude, env, deadline, last, turn):
 
 def converse(run, scenario, claude, model, env, deadline):
     session, message, turns = None, scenario['prompt'], 0
+    restarted = False
     for turn in range(1, scenario['max_turns'] + 1):
         turns = turn
         guard(env, run / 'bin')
         output = run / 'turns' / f'{turn:02}.jsonl'
-        code = invoke(command(claude, message, model, session), env, run / 'project', output, deadline)
+        pattern = scenario.get('restart_when_audit_contains')
+        restart_args = {}
+        if not restarted and pattern and turn < scenario['max_turns']:
+            restart_args['restart_check'] = lambda process: interrupt_for_restart(
+                run, pattern, turn, session, output, process)
+        code = invoke(command(claude, message, model, session), env, run / 'project', output,
+                      deadline, **restart_args)
+        if not restarted and (run / 'restart.json').exists():
+            restarted = True
+            session, message = None, scenario['resume_prompt']
+            continue
         results = result_events(output)
         if results and is_infra_error(results[-1].get('result', '')):
             return turns, 'infra_error'
