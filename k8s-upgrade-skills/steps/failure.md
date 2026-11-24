@@ -49,8 +49,8 @@ Common causes by gate:
 | Gate | Fails when |
 |---|---|
 | Phase 2 | CP status not ACTIVE or version not the target |
-| Phase 3 | an add-on in a bad state, or kube-system pods unhealthy |
-| Phase 4 | node version mismatch, FailedEvict, or BLOCKING pods |
+| Phase 3 | an add-on in a bad state, or kube-system pods unhealthy; `CONFLICT` needs operator PRESERVE configuration |
+| Phase 4 | node version mismatch, FailedEvict, BLOCKING pods, or `PV-AZ` without a Ready schedulable node in the PV zone |
 | Phase 5 | Karpenter node version mismatch or NotReady |
 | Phase 6 | Terraform recreate detected or plan failure (check `--auth-prefix`/`--tf-var-file`) |
 | Phase 7 | a sub-check failed or an Insight is not passing; no completion report |

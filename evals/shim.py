@@ -175,8 +175,8 @@ def describe_addon(args, state, scenario):
         if queue:
             state['addons'][queue[0]]['polls'] = scenario['transitions']['addon_polls'] - 1
     return render({'addon': {'addonName': name, 'addonVersion': addon['version'],
-                            'status': 'UPDATING' if updating else 'ACTIVE',
-                            'health': {'issues': []}}}, args), 0
+                            'status': addon.get('status', 'UPDATING' if updating else 'ACTIVE'),
+                            'health': {'issues': addon.get('issues', [])}}}, args), 0
 
 
 def node(name, version, labels, os_image):
@@ -215,8 +215,12 @@ def worker_nodes(state):
     topology = state['topology']
     labels = ({'karpenter.sh/nodepool': 'default'} if topology['karpenter'] else
               {'eks.amazonaws.com/nodegroup': 'demo-system', 'workload': 'system', 'nodegroup': 'system'})
+    names = ('a', 'b', 'c', 'd') if state.get('pv_az_gap') else ('a', 'b')
     nodes = [node('worker-' + x + suffix, state['node_version'],
-                  labels, 'Amazon Linux 2023' if topology['mng'] else 'Bottlerocket') for x in ('a', 'b')]
+                  labels, 'Amazon Linux 2023' if topology['mng'] else 'Bottlerocket') for x in names]
+    if state.get('pv_az_gap') and not suffix:
+        for zonal_node in nodes[2:]:
+            zonal_node['metadata']['labels']['topology.kubernetes.io/zone'] = 'ap-northeast-2c'
     if topology['fargate']:
         nodes += [node('fargate-system' + fg_suffix, state['fargate_version'],
                    {'eks.amazonaws.com' + '/compute-type': 'fargate'}, 'Amazon Linux 2')]
@@ -229,8 +233,31 @@ def resources(kind, state):
     suffix = '-new' if state['node_version'] != state['initial_version'] else ''
     if kind == 'nodes':
         return nodes
+    if kind in ('pv', 'pvc'):
+        if not state.get('pv_az_gap'):
+            return []
+        if kind == 'pvc':
+            return [{'kind': 'PersistentVolumeClaim', 'metadata': {'name': 'redis-data',
+                'namespace': 'default'}, 'spec': {'volumeName': 'redis-pv'}, 'status': {'phase': 'Bound'}}]
+        return [{'kind': 'PersistentVolume', 'metadata': {'name': 'redis-pv'},
+            'status': {'phase': 'Bound'}, 'spec': {'claimRef': {'name': 'redis-data', 'namespace': 'default'},
+                'csi': {'driver': 'ebs.csi.aws.com', 'volumeHandle': 'eval-volume'},
+                'nodeAffinity': {'required': {'nodeSelectorTerms': [{'matchExpressions': [{
+                    'key': 'topology.ebs.csi.aws.com/zone', 'operator': 'In',
+                    'values': ['ap-northeast-2c']}]}]}}}}]
     if kind == 'pods':
-        return [pod('web-' + x, 'default', nodes[i]['metadata']['name'], 'web')
+        extra = []
+        if state.get('pv_az_gap'):
+            redis = pod('redis-0', 'default', nodes[-1]['metadata']['name'], 'redis')
+            redis['metadata']['ownerReferences'] = [{'kind': 'StatefulSet', 'name': 'redis'}]
+            redis['spec']['containers'][0]['volumeMounts'] = [{'name': 'data', 'mountPath': '/data'}]
+            redis['spec']['volumes'] = [{'name': 'data', 'persistentVolumeClaim': {'claimName': 'redis-data'}}]
+            if suffix:
+                redis['spec'].pop('nodeName')
+                redis['metadata']['creationTimestamp'] = datetime.now(timezone.utc).isoformat()
+                redis['status'] = {'phase': 'Pending'}
+            extra.append(redis)
+        return extra + [pod('web-' + x, 'default', nodes[i]['metadata']['name'], 'web')
                 for i, x in enumerate(('a', 'b'))] + [
             pod('coredns-' + x, 'kube-system', nodes[-1]['metadata']['name'], 'coredns')
             for x in ('a', 'b')]
@@ -277,7 +304,8 @@ def resources(kind, state):
 ALIASES = {'no': 'nodes', 'node': 'nodes', 'po': 'pods', 'pod': 'pods',
     'deploy': 'deployments', 'deployment': 'deployments', 'pdbs': 'pdb',
     'poddisruptionbudgets': 'pdb', 'poddisruptionbudget': 'pdb',
-    'persistentvolumes': 'pv', 'customresourcedefinitions': 'crd', 'crds': 'crd',
+    'persistentvolumes': 'pv', 'persistentvolumeclaims': 'pvc', 'persistentvolumeclaim': 'pvc',
+    'customresourcedefinitions': 'crd', 'crds': 'crd',
     'nodeclaim': 'nodeclaims', 'nodepools': 'nodepool', 'ec2nodeclass': 'ec2nodeclasses',
     'services': 'svc', 'service': 'svc', 'endpointslice': 'endpointslices',
     'statefulset': 'statefulsets', 'ds': 'daemonsets', 'ingress': 'ingresses'}
@@ -492,6 +520,10 @@ def prior_state(state, scenario):
                   'values': node_class(state['ami_alias'])}] if topology['karpenter'] else []
     eks = [{'address': 'module.eks.aws_eks_cluster.this[0]', 'type': 'aws_eks_cluster',
             'values': {'name': scenario['cluster_name'], 'version': state['version']}}]
+    if state.get('addon_conflict'):
+        eks.append({'address': 'module.eks.aws_eks_addon.this["vpc-cni"]', 'type': 'aws_eks_addon',
+            'values': {'addon_name': 'vpc-cni', 'addon_version': state['addons']['vpc-cni']['version'],
+                       'resolve_conflicts_on_update': 'NONE'}})
     if topology['fargate']:
         eks.append({'address': 'module.eks.module.fargate_profile["system"].aws_eks_fargate_profile.this[0]',
                     'type': 'aws_eks_fargate_profile', 'values': {'fargate_profile_name': 'system'}})
@@ -514,6 +546,13 @@ def plan(project, args, state, scenario):
         changes.append({'address': 'module.eks.aws_eks_cluster.this[0]', 'type': 'aws_eks_cluster',
             'change': {'actions': ['update'], 'before': {'version': state['version']},
                        'after': {'version': version}}})
+    if state.get('addon_conflict') and version != state['initial_version'] and not state.get('addon_applied') \
+            and (not targets or any(t.startswith('module.eks') for t in targets)):
+        changes.append({'address': 'module.eks.aws_eks_addon.this["vpc-cni"]', 'type': 'aws_eks_addon',
+            'change': {'actions': ['update'],
+                'before': {'addon_name': 'vpc-cni', 'addon_version': state['addons']['vpc-cni']['version']},
+                'after': {'addon_name': 'vpc-cni', 'addon_version': 'v1.34.0-eksbuild.1',
+                          'resolve_conflicts_on_update': 'NONE'}}})
     alias_key = 'eks_node_ami_alias_al2023' if state['topology']['mng'] else 'eks_node_ami_alias_bottlerocket'
     alias = values.get(alias_key, state['ami_alias'])
     if state['topology']['mng'] and alias != state['ami_alias'] and (not targets or any(t.startswith('module.eks') for t in targets)):
@@ -549,6 +588,11 @@ def apply_changes(changes, state, scenario):
                 for addon in state['addons'].values():
                     addon['polls'] = transitions['addon_polls']
             effects.append('control_plane')
+        elif entry['type'] == 'aws_eks_addon':
+            state['addon_applied'] = True
+            state['addons']['vpc-cni'].update(status='UPDATE_FAILED', polls=0, issues=[{
+                'code': 'ConfigurationConflict', 'message': 'Conflicts found in aws-node DaemonSet configuration'}])
+            effects.append('addon_update')
         elif entry['type'] == 'aws_eks_node_group':
             state.setdefault('mng_release', state['ami_alias'])
             state['mng_release_target'] = after['release_version']

@@ -88,7 +88,7 @@ class Fake:
 
     def kubectl(self, rest):
         kind = rest[1] if rest[1] != "-A" else rest[2]
-        items = {"nodes": self.nodes,
+        items = {"nodes": self.nodes, "pv": [],
                  "services": [{"metadata": {"name": "web", "namespace": "shop"},
                                "spec": {"selector": {"app": "web"}, "type": "ClusterIP"}},
                               {"metadata": {"name": "kube-dns", "namespace": "kube-system"},
@@ -358,3 +358,80 @@ def test_tf_cli_args_var_outranks_tfvars_file(tmp_path, monkeypatch):
     assert source == "unknown" and "TF_CLI_ARGS" in reason
     (tmp_path / "dev.tfvars").write_text('cluster_version = "1.34"\n')
     assert discover.set_in({}, tmp_path, "cluster_version", "dev.tfvars")[0] == str(tmp_path / "dev.tfvars")
+
+
+@pytest.mark.parametrize("policy", [None, "NONE", "PRESERVE"])
+def test_addon_conflict_policy_risk_reaches_interview(project, monkeypatch, capsys, policy):
+    plan = make_plan()
+    address = 'module.wrapper.module.eks.aws_eks_addon.this["vpc-cni"]'
+    values = {"addon_name": "vpc-cni"}
+    if policy is not None:
+        values["resolve_conflicts_on_update"] = policy
+    plan["planned_values"] = {"root_module": {"child_modules": [{"resources": [
+        {"address": address, "type": "aws_eks_addon", "values": values}]}]}}
+    code, doc, _ = run(monkeypatch, Fake(plan))
+    assert doc["addons"] == [{"address": address, "addon_name": "vpc-cni",
+                              "resolve_conflicts_on_update": policy or "unknown"}]
+    risks = [u for u in doc["unknowns"] if u["field"] == "addons." + address]
+    assert bool(risks) == (policy != "PRESERVE")
+    assert code == (0 if policy == "PRESERVE" else 2)
+    if risks:
+        assert "conflict will make the update fail" in risks[0]["reason"]
+        assert "NEXT: ASK_USER addons." + address in capsys.readouterr().out
+
+
+class ZonalFake(Fake):
+    def kubectl(self, rest):
+        kind = rest[1] if rest[1] != "-A" else rest[2]
+        if kind == "pv":
+            return json.dumps({"items": [{"metadata": {"name": "ebs-data"},
+                "status": {"phase": "Bound"}, "spec": {"nodeAffinity": {"required": {
+                    "nodeSelectorTerms": [{"matchExpressions": [{
+                        "key": "topology.ebs.csi.aws.com/zone", "operator": "In",
+                        "values": ["test-1c"]}]}]}}}}]}), 0
+        return super().kubectl(rest)
+
+
+@pytest.mark.parametrize("pools,expected_risk", [(["system"], True),
+                                              (["system", "system"], True),
+                                              (["system", "workers"], False)])
+def test_pv_zone_risk_counts_ready_nodes_and_independent_pools(project, monkeypatch, pools, expected_risk):
+    nodes = [node({"eks.amazonaws.com/nodegroup": pool, "topology.kubernetes.io/zone": "test-1c"})
+             for pool in pools]
+    for item in nodes:
+        item["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    # An unready node cannot improve zonal coverage.
+    nodes.append(node({"eks.amazonaws.com/nodegroup": "unready",
+                       "topology.kubernetes.io/zone": "test-1c"}))
+    code, doc, _ = run(monkeypatch, ZonalFake(make_plan(), nodes=nodes))
+    zone = doc["cluster"]["pv_zones"]["test-1c"]
+    assert zone["bound_pvs"] == 1 and zone["ready_nodes"] == len(pools)
+    risks = [u for u in doc["unknowns"] if u["field"] == "cluster.pv_zones.test-1c"]
+    assert bool(risks) == expected_risk
+    assert code == (2 if expected_risk else 0)
+
+
+def test_pv_discovery_kubectl_failure_is_unknown_with_reason(project, monkeypatch):
+    class Unavailable(Fake):
+        def kubectl(self, rest):
+            return "kubectl unavailable", 127
+    code, doc, _ = run(monkeypatch, Unavailable(make_plan()))
+    assert code == 2
+    assert doc["cluster"]["pv_zones"] == "unknown"
+    assert any(u["field"] == "cluster.pv_zones" and "failed or unavailable" in u["reason"]
+               for u in doc["unknowns"])
+
+
+def test_missing_kubectl_stops_127(project, monkeypatch):
+    monkeypatch.setattr(discover.shutil, "which", lambda tool: None if tool == "kubectl" else "/bin/x")
+    assert discover.main(["--target-version", "1.34", "--root", "."]) == 127
+
+
+def test_fargate_node_not_counted_for_pv_zone(project, monkeypatch):
+    nodes = [node({"eks.amazonaws.com/nodegroup": "a", "topology.kubernetes.io/zone": "test-1c"}),
+             node({"eks.amazonaws.com/compute-type": "fargate", "topology.kubernetes.io/zone": "test-1c"})]
+    for item in nodes:
+        item["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    code, doc, _ = run(monkeypatch, ZonalFake(make_plan(), nodes=nodes))
+    assert doc["cluster"]["pv_zones"]["test-1c"]["ready_nodes"] == 1
+    assert any(u["field"] == "cluster.pv_zones.test-1c" for u in doc["unknowns"])

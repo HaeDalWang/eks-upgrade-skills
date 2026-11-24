@@ -50,6 +50,8 @@ MNG_SSM = {
 }
 BOTTLEROCKET_SSM = "/aws/service/bottlerocket/aws-k8s-{v}/{arch}/latest/image_version"
 NODE_ARCH = {"amd64": "x86_64", "arm64": "arm64"}
+ZONE_KEYS = ("topology.kubernetes.io/zone", "topology.ebs.csi.aws.com/zone",
+             "failure-domain.beta.kubernetes.io/zone")
 
 
 class Halt(Exception):
@@ -311,6 +313,28 @@ def matching_variable(plan, values, field, label):
     return names[0], ""
 
 
+def addon_facts(plan, found, unknowns):
+    """Expose planned add-on conflict policies, including wrapper-module resources."""
+    addons = {a: (r["after"] if r["after"] is not None else r["before"])
+              for a, r in found.items() if r["type"] == "aws_eks_addon"}
+    root = (plan.get("planned_values") or {}).get("root_module") or {}
+    for resource in state_resources(root):
+        if resource.get("type") == "aws_eks_addon":
+            addons[resource["address"]] = resource.get("values") or {}
+    facts = []
+    for address, values in sorted(addons.items()):
+        name, policy = values.get("addon_name"), values.get("resolve_conflicts_on_update")
+        facts.append({"address": address, "addon_name": name or "unknown",
+                      "resolve_conflicts_on_update": policy or "unknown"})
+        if not name:
+            unknowns.append(unknown("addons." + address, "addon_name is unknown in the plan"))
+        if policy in (None, "", "NONE"):
+            unknowns.append(unknown("addons." + address, "risk: {} has resolve_conflicts_on_update "
+                                    "{}; a configuration conflict will make the update fail".format(
+                                        name or address, policy or "unset")))
+    return facts
+
+
 def under(address, eks_address):
     """True if address is inside the EKS module, including count/for_each instances."""
     return bool(re.match(r'{}(\[(?:[^\]"]|"[^"]*")+\])?\.'.format(re.escape(eks_address)), address or ""))
@@ -396,6 +420,48 @@ def node_pool(labels):
     return "unmanaged"
 
 
+def pv_zone_facts(nodes, unknowns):
+    """Bound zonal PVs and their Ready-node/pool coverage for the interview."""
+    pvs = kubectl_json("pv", all_ns=False)
+    if pvs is None or nodes is None:
+        unknowns.append(unknown("cluster.pv_zones", "kubectl get pv/nodes failed or unavailable"))
+        return "unknown"
+    zones = {}
+    for pv in pvs.get("items") or []:
+        if (pv.get("status") or {}).get("phase") != "Bound":
+            continue
+        required = ((pv.get("spec") or {}).get("nodeAffinity") or {}).get("required") or {}
+        pinned = {z for term in required.get("nodeSelectorTerms") or []
+                  for expr in term.get("matchExpressions") or []
+                  if expr.get("key") in ZONE_KEYS and expr.get("operator") == "In"
+                  for z in expr.get("values") or []}
+        for zone in pinned:
+            entry = zones.setdefault(zone, {"bound_pvs": 0, "ready_nodes": 0, "node_pools": {}})
+            entry["bound_pvs"] += 1
+    for node in nodes.get("items") or []:
+        if not any(c.get("type") == "Ready" and c.get("status") == "True"
+                   for c in (node.get("status") or {}).get("conditions") or []):
+            continue
+        labels = (node.get("metadata") or {}).get("labels") or {}
+        pool = node_pool(labels)
+        if pool == "Fargate":  # cannot mount EBS PVs
+            continue
+        pool += ":" + (labels.get("eks.amazonaws.com/nodegroup")
+                       or labels.get("karpenter.sh/nodepool") or "unknown")
+        for zone in {labels[k] for k in ZONE_KEYS if k in labels} & zones.keys():
+            entry = zones[zone]
+            entry["ready_nodes"] += 1
+            entry["node_pools"][pool] = entry["node_pools"].get(pool, 0) + 1
+    for zone, entry in sorted(zones.items()):
+        if entry["ready_nodes"] <= 1 or len(entry["node_pools"]) == 1:
+            unknowns.append(unknown("cluster.pv_zones." + zone,
+                                    "risk: {} bound PVs in {} have {} Ready nodes across {} pool(s); "
+                                    "a node rollout can leave PV-bound Pods Pending".format(
+                                        entry["bound_pvs"], zone, entry["ready_nodes"],
+                                        len(entry["node_pools"]))))
+    return zones
+
+
 def cluster_facts(prefix, name, unknowns):
     facts = {"version": None, "status": None, "running_pools": {}, "nodegroup_ami_types": []}
     described, reason = aws_json(prefix, ["eks", "describe-cluster", "--name", name], "describe-cluster")
@@ -412,6 +478,7 @@ def cluster_facts(prefix, name, unknowns):
         if ami_type and ami_type not in facts["nodegroup_ami_types"]:
             facts["nodegroup_ami_types"].append(ami_type)
     nodes = kubectl_json("nodes", all_ns=False)
+    facts["pv_zones"] = pv_zone_facts(nodes, unknowns)
     if nodes is None:
         unknowns.append(unknown("cluster.running_pools", "kubectl get nodes failed"))
         return facts
@@ -546,6 +613,7 @@ def analyze_terraform(args, doc, plan, tf_dir):
         unknowns.append(unknown("module.major", "no version constraint or git ref on the EKS module"))
     doc["cluster_version"] = cluster_version(plan, chain, major, tf_dir, args.tf_var_file, unknowns)
     found = resources(plan)
+    doc["addons"] = addon_facts(plan, found, unknowns)
     doc["mng"] = mng_facts(plan, found, address, unknowns)
     doc["karpenter"] = karpenter_facts(plan, found, unknowns)
     for facts, key, label in ((doc["mng"], "ami_variable", "mng"), (doc["karpenter"], "alias_variable", "karpenter")):

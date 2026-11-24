@@ -60,7 +60,9 @@ def gate_next(exit_code: int, rows: list) -> str:
     """Route every existing failure/warning using only this invocation's records.
 
     Path                              NEXT action
-    phase2..7 FAIL                     STOP
+    phase3 CONFLICT FAIL              STOP with PRESERVE guidance
+    phase4 PV-AZ FAIL                 STOP with zone capacity guidance
+    phase2..7 other FAIL               STOP
     phase3 Add-on UPDATING             RETRY
     phase4 STALE Pod                   RUN delete-stale-pods <ns/pod ...>
     phase4 TRANSIENT Pod               RETRY
@@ -70,6 +72,19 @@ def gate_next(exit_code: int, rows: list) -> str:
     RUN emits only the fixed stale-Pod kind; no current gate requests a restart.
     """
     if exit_code == 1:
+        failures = [row["detail"] for row in rows if row["result"] == "FAIL"]
+        conflicts = [detail for detail in failures if detail.startswith("CONFLICT ")]
+        if conflicts:
+            names = ", ".join(dict.fromkeys(re.findall(r"CONFLICT ([a-zA-Z0-9_-]+):", " ".join(conflicts))))
+            return ('NEXT: STOP add-on ConfigurationConflict (' + names + '); set '
+                    'resolve_conflicts_on_update = "PRESERVE" on that aws_eks_addon, '
+                    'then rerun the add-on step')
+        zones = [zone for detail in failures if detail.startswith("PV-AZ ")
+                 for zone in re.findall(r"zone=([^ ;]+)", detail)]
+        if zones:
+            zone = ",".join(dict.fromkeys(zones))
+            return (f"NEXT: STOP no Ready node in zone {zone} for PV-bound Pods; add a node in {zone} "
+                    "(node group desired +1), wait for the Pods, then restore desired")
         return "NEXT: STOP gate failed; resolve FAIL records before retrying"
     warnings = [row for row in rows if row["result"] == "WARN"]
     stale = [row for row in warnings if row["rule_id"] == "PHASE4-DATAPLANE"
@@ -187,6 +202,7 @@ def gate_phase3(cluster_name: str, audit_log: str) -> int:
         return 1
 
     bad_addons = []
+    conflicts = []
     updating_addons = []
     for addon in addons:
         r = run_cmd(["aws", "eks", "describe-addon", "--cluster-name", cluster_name, "--addon-name", addon, "--output", "json"])
@@ -194,7 +210,8 @@ def gate_phase3(cluster_name: str, audit_log: str) -> int:
             bad_addons.append(f"{addon}(조회실패)")
             continue
         try:
-            status = json.loads(r.stdout).get("addon", {}).get("status", "")
+            addon_data = json.loads(r.stdout).get("addon", {})
+            status = addon_data.get("status", "")
         except json.JSONDecodeError:
             bad_addons.append(f"{addon}(JSON파싱실패)")
             continue
@@ -204,9 +221,12 @@ def gate_phase3(cluster_name: str, audit_log: str) -> int:
             updating_addons.append(addon)
         else:
             bad_addons.append(f"{addon}({status})")
+            for issue in addon_data.get("health", {}).get("issues", []):
+                if issue.get("code") == "ConfigurationConflict":
+                    conflicts.append(f"CONFLICT {addon}: {issue.get('message') or 'message unknown'}")
 
     if bad_addons:
-        detail = f"비정상 Add-on: {', '.join(bad_addons)}"
+        detail = ("; ".join(conflicts) + "; " if conflicts else "") + f"비정상 Add-on: {', '.join(bad_addons)}"
         audit_write("PHASE3-ADDON", "FAIL", detail)
         print(f"{RED}❌ PHASE3-ADDON FAIL{NC}  {detail}")
         failed = True
@@ -473,6 +493,67 @@ def mng_rollout_in_progress(cluster_name: str) -> bool:
     return False
 
 
+ZONE_KEYS = ("topology.kubernetes.io/zone", "topology.ebs.csi.aws.com/zone",
+             "failure-domain.beta.kubernetes.io/zone")
+
+
+def pv_zones(pv: dict) -> set:
+    """Required terms are ORed; an unzoned term means the PV is not zone-pinned."""
+    terms = pv.get("spec", {}).get("nodeAffinity", {}).get("required", {}).get("nodeSelectorTerms", [])
+    zones = set()
+    for term in terms:
+        allowed = None
+        for expression in term.get("matchExpressions", []):
+            if expression.get("key") in ZONE_KEYS and expression.get("operator") == "In":
+                values = set(expression.get("values", []))
+                allowed = values if allowed is None else allowed & values
+        if allowed is None:
+            return set()
+        zones.update(allowed)
+    return zones
+
+
+def pending_pv_gaps(pods: list, nodes: list) -> list:
+    """Fetch storage only for Pending PVC users; raise on failed storage reads."""
+    pending = [pod for pod in pods if pod.get("status", {}).get("phase") == "Pending"
+               and any("persistentVolumeClaim" in v for v in pod.get("spec", {}).get("volumes", []))]
+    if not pending:
+        return []
+    resources = {}
+    for resource, scope in (("pvc", ["-A"]), ("pv", [])):
+        r = run_cmd(["kubectl", "get", resource] + scope + ["-o", "json"])
+        if r.returncode != 0:
+            raise ValueError(f"kubectl get {resource} 실패")
+        try:
+            resources[resource] = json.loads(r.stdout)["items"]
+        except (ValueError, KeyError, TypeError):
+            raise ValueError(f"kubectl get {resource} JSON 파싱 실패") from None
+    claims = {(c.get("metadata", {}).get("namespace", "default"), c.get("metadata", {}).get("name")):
+              c.get("spec", {}).get("volumeName") for c in resources["pvc"]}
+    volumes = {pv.get("metadata", {}).get("name"): pv for pv in resources["pv"]}
+    # Fargate nodes cannot mount EBS PVs, so they never close a zone gap.
+    ready_zones = {value for node in nodes if not node.get("spec", {}).get("unschedulable")
+                   and node.get("metadata", {}).get("labels", {}).get(
+                       "eks.amazonaws.com/compute-type") != "fargate"
+                   and any(c.get("type") == "Ready" and c.get("status") == "True"
+                           for c in node.get("status", {}).get("conditions", []))
+                   for key, value in node.get("metadata", {}).get("labels", {}).items() if key in ZONE_KEYS}
+    gaps = []
+    for pod in pending:
+        meta = pod.get("metadata", {})
+        ns, name = meta.get("namespace", "default"), meta.get("name", "?")
+        for volume in pod.get("spec", {}).get("volumes", []):
+            claim = volume.get("persistentVolumeClaim", {}).get("claimName")
+            pv_name = claims.get((ns, claim))
+            pv = volumes.get(pv_name, {})
+            if pv.get("status", {}).get("phase") != "Bound":
+                continue
+            zones = pv_zones(pv)
+            if zones and not zones & ready_zones:
+                gaps.append(f"PV-AZ pod={ns}/{name} PV={pv_name} zone={','.join(sorted(zones))}")
+    return gaps
+
+
 @phase_boundary(4)
 def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
                 node_scope: str = "all") -> int:
@@ -623,6 +704,27 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
 
     # Reuse nodes parsed earlier
     nodes_json = {"items": nodes}
+
+    try:
+        gaps = pending_pv_gaps(pods_json.get("items", []), nodes)
+    except ValueError as error:
+        audit_write("PHASE4-DATAPLANE", "FAIL", str(error))
+        print(f"{RED}PHASE4-DATAPLANE FAIL{NC}  {error}")
+        audit_flush(audit_log)
+        return 1
+    if gaps:
+        code, detail = rollout_result(audit_log, mng_rollout_in_progress(cluster_name), "; ".join(gaps))
+        result = "WARN" if code == 2 else "FAIL"
+        audit_write("PHASE4-DATAPLANE", result, detail)
+        print(f"PHASE4-DATAPLANE {result}  {detail}")
+        if code == 1:
+            audit_flush(audit_log)
+            return 1
+        exit_code = 2
+        affected = {re.search(r"pod=([^ ]+)", gap).group(1) for gap in gaps}
+        pods_json = {"items": [pod for pod in pods_json.get("items", [])
+                               if pod.get("metadata", {}).get("namespace", "default") + "/" +
+                               pod.get("metadata", {}).get("name", "?") not in affected]}
 
     classification = classify_pods(pods_json, nodes_json)
 

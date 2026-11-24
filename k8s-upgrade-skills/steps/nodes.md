@@ -120,6 +120,7 @@ kubectl get nodes \
 
 During a rollout, the gate returns exit 2 `NEXT: RETRY`; rerun every 30s.
 After 30 minutes from the last `APPLY-GUARD | PASS`, it FAILs.
+`PV-AZ` FAIL: follow the zone guidance in `NEXT`, STOP and report; capacity or Terraform changes belong to the operator.
 
 ```bash
 python3 scripts/phase_gate.py phase4 \

@@ -153,6 +153,15 @@ def grade(run):
     bad = drain_check(applies, before)
     check('drain_started_before_apply', bool(cp) and bool(nodes) and not bad,
           f'calls.jsonl applies lacking preceding active DrainWatch start audit: {bad}')
+    for name, rule, prefix in [('pv_az_stop', 'PHASE4-DATAPLANE', 'PV-AZ '),
+                               ('conflict_stop', 'PHASE3-ADDON', 'CONFLICT ')]:
+        failures = [r for r in audit if r[2] == rule and r[3] == 'FAIL' and r[4].startswith(prefix)]
+        after = [n for n, c in applies if failures and c.get('audit_lines', 0) >= failures[0][0]]
+        reports = [p for p in run.rglob('*FAILED*.md') if p.is_file()]
+        report_rows = [r for r in audit if r[2:4] == ('REPORT', 'PASS')
+                       and failures and r[0] > failures[0][0]]
+        check(name, bool(failures and reports and report_rows) and not after,
+              f'audit.log failures={failures}; applies after FAIL={after}; FAILED reports={reports}; REPORT={report_rows}')
     final_checks(check, calls, audit)
     scenario_checks(check, scenario, calls, audit, applies, before)
     final = ''
