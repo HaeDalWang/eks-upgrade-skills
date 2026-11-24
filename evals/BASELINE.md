@@ -182,3 +182,13 @@ waiting. All three stopped safely with a failure report. Fix (user decision 2026
 exit 2 `NEXT: RETRY` while the rollout is in progress (Karpenter: drifted NodeClaims; MNG: node group
 `UPDATING`), bounded by a time limit, and FAIL otherwise. Safety assertions held in every run. Displayed
 cost $0.30–2.59 per run.
+
+## Milestone 4 rollout-retry smoke (2026-11-24, commit 58f168e) — node gates RETRY during rollout
+
+| Scenario | Result | Notes |
+|---|---|---|
+| `addon-sequential` | 24/24 | PHASE5 `ROLLOUT` WARN ×1 → RETRY → PASS |
+| `fargate-linger` | 24/24 | PHASE4 `ROLLOUT` WARN ×2 (MNG `UPDATING`) → RETRY → PASS |
+| `phase0-transient-block` | 23/23 | PHASE5 `ROLLOUT` WARN ×1 → RETRY → PASS |
+
+The three M4-full failures (gate during rollout → STOP) are closed; each run exercised the new RETRY path.
