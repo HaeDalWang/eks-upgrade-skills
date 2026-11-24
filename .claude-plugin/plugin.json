@@ -1,0 +1,6 @@
+{
+  "name": "k8s-upgrade-skills",
+  "version": "0.1.0",
+  "description": "Phase-gated EKS upgrades and Helm compatibility checks",
+  "skills": ["./k8s-upgrade-skills", "./helm-k8s-compat"]
+}

@@ -61,27 +61,25 @@
 
 ### 2. 설치
 
-```bash
-git clone https://github.com/HaeDalWang/k8s-upgrade-skills.git
-cd k8s-upgrade-skills
-./install.sh --tool claude    # claude | kiro | cursor | antigravity, 생략하면 대화형 선택
-```
-
-`install.sh`는 `k8s-upgrade-skills/`와 `helm-k8s-compat/` 두 스킬을 도구의 전역 스킬 경로에 복사합니다. 도구 설정 파일(mcp.json 등)은 건드리지 않습니다.
-
-| 도구 | 설치 경로 |
-|------|----------|
-| Claude Code | `~/.claude/skills/` |
-| Kiro | `~/.kiro/skills/` |
-| Cursor | `~/.cursor/skills/` |
-| Antigravity | `~/.agent/skills/` |
+Claude Code와 Codex CLI에 같은 plugin을 설치합니다. 두 스킬과 APPLY-GUARD hook이 함께 배포됩니다.
 
 ```bash
-./install.sh --all         # 모든 도구에 설치
-./install.sh --force       # 재설치(업데이트)
-./install.sh --status      # 설치 상태 확인
-./install.sh --uninstall   # 전체 제거
+# Claude Code (로컬 checkout 경로도 marketplace add에 사용 가능)
+claude plugin marketplace add HaeDalWang/k8s-upgrade-skills
+claude plugin install k8s-upgrade-skills@k8s-upgrade-skills
+
+# Codex CLI
+codex plugin marketplace add HaeDalWang/k8s-upgrade-skills
+codex plugin add k8s-upgrade-skills@k8s-upgrade-skills
 ```
+
+**Codex는 설치 후 `/hooks`에서 이 hook을 신뢰(trust)해야 합니다.** 신뢰하지 않으면 hook이 조용히 건너뛰어져 apply 차단이 동작하지 않습니다.
+
+Hook은 현재 디렉터리(또는 상위 디렉터리)의 `audit.log`에
+`PLAN-APPROVED`가 있으면 같은 saved planfile의 마지막 `APPLY-GUARD PASS`와 sha256을 확인하고,
+검증 누락·변경된 파일·`-auto-approve`·apply 계획 옵션을 차단합니다. 스킬 실행 밖에서는 관여하지 않습니다.
+
+Plugin 없이 스킬만 쓰려면 `~/.agents/skills/`에 두 스킬 디렉터리의 symlink를 둘 수 있지만 hook은 제공되지 않습니다.
 
 ### 3. 실행
 
@@ -218,7 +216,7 @@ registry에 없는 차트는 통과시키지 않고 "수동 검토 필요"(INFO)
 EKS 업그레이드는 위험하고, 단계가 많고, 오래 걸립니다. 이 프로젝트는 개인의 인프라 트러블슈팅 노하우를 AI Agent의 Skill로 명세화하면, 작업을 더 안전하게 하면서 엔지니어의 시간을 다른 일에 돌릴 수 있다는 가설에서 출발했습니다.
 
 1. **단순 질의응답** — 일반 챗봇은 빠르게 바뀌는 오픈소스 생태계의 버전·의존성을 정확히 따라가지 못했습니다.
-2. **컨텍스트 결합** — Cursor·Kiro·Claude Code·Antigravity에 시스템 프롬프트와 MCP를 붙이고 AWS 공식 문서로 팩트체크하게 했습니다. 문제 해결은 나아졌지만, 사전 작업·실시간 대응·사후 검증이 이어지는 작업은 여전히 사람이 전체 흐름을 쥐고 있어야 했습니다.
+2. **컨텍스트 결합** — Claude Code·Codex CLI에 시스템 프롬프트와 MCP를 붙이고 AWS 공식 문서로 팩트체크하게 했습니다. 문제 해결은 나아졌지만, 사전 작업·실시간 대응·사후 검증이 이어지는 작업은 여전히 사람이 전체 흐름을 쥐고 있어야 했습니다.
 3. **Skill로 구조화** — 수동 절차 자체를 에이전트가 따라 실행하는 Skill로 옮겼습니다. 5,000줄이 넘는 Helm values 같은 파일을 사람이 Ctrl+F로 훑는 대신 에이전트가 분석하고, 진행 과정이 `audit.log`와 Markdown 보고서로 남아 계획서·결과 보고서를 따로 쓸 필요가 줄었습니다.
 
 목표는 작업 난이도를 낮추는 것입니다. 프로덕션에서 한 번의 휴먼 에러가 장애로 이어지는 일을 구조로 막고, 주기적으로 돌아오는 업그레이드의 부담을 덜어, 아낀 시간을 학습과 핵심 업무에 쓰는 것입니다.
@@ -236,6 +234,7 @@ EKS 업그레이드는 위험하고, 단계가 많고, 오래 걸립니다. 이 
 ├── docs/                      # 필요 권한, 실패 대응 runbook
 ├── example/terraform-eks/     # EKS + Karpenter 참조 Terraform + recipe.md 예제
 ├── tests/                     # 스크립트 단위·통합 테스트
-├── install.sh
+├── .claude-plugin/            # plugin·self-marketplace manifest
+├── hooks/                     # Bash PreToolUse APPLY-GUARD hook
 └── QnA.md
 ```

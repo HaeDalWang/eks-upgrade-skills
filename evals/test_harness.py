@@ -25,7 +25,7 @@ def cli(sandbox, tool, *args, check=True):
 
 def script(sandbox, name, *args):
     run, env, _ = sandbox
-    root = run / 'home/.claude/skills/k8s-upgrade-skills/scripts'
+    root = next((run / 'home/.claude/plugins/cache').glob('*/*/*/k8s-upgrade-skills/scripts'))
     return subprocess.run([str(run / 'bin/python3'), str(root / name), *args],
                           cwd=run / 'project', env=env, capture_output=True,
                           text=True, timeout=60)
@@ -60,7 +60,7 @@ def test_sandbox_installs_unchanged_skill_and_clean_environment(sandbox):
     assert set(env) == {'HOME', 'PATH', 'TERM', 'LANG', 'CLAUDE_CODE_OAUTH_TOKEN'}
     assert not (run / 'home/.aws').exists()
     assert not (run / 'home/.kube').exists()
-    installed = run / 'home/.claude/skills/k8s-upgrade-skills'
+    installed = next((run / 'home/.claude/plugins/cache').glob('*/*/*/k8s-upgrade-skills'))
     for source in (REPO / 'k8s-upgrade-skills').rglob('*'):
         if source.is_file() and '__pycache__' not in source.parts:
             assert (installed / source.relative_to(REPO / 'k8s-upgrade-skills')).read_bytes() == source.read_bytes()

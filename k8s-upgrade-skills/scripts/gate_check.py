@@ -42,7 +42,7 @@ try:
         _gate, reset_gate,
     )
 except ImportError:
-    print("ERROR: lib.py not found. Run install.sh --force to reinstall.", file=sys.stderr)
+    print("ERROR: lib.py not found. Please reinstall the plugin.", file=sys.stderr)
     sys.exit(127)
 
 # ── 모듈 레벨 mutable 변수 프록시 ──

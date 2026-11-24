@@ -46,6 +46,8 @@ Open [steps/start.md](steps/start.md) and follow it for these seven steps.
 5. **Stop on failure.** Any FAIL or unexpected destroy/replace → stop, report, wait for the user.
    No automatic rollback; a Control Plane rollback (EKS allows it within 7 days) is the user's call — see `steps/failure.md`.
 
+The plugin hook blocks apply without APPLY-GUARD PASS; on Codex, trust it in `/hooks`.
+
 ## Exit codes and `NEXT:`
 
 | Exit | Meaning | Action |

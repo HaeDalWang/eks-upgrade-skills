@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -24,3 +26,27 @@ def sandbox(tmp_path):
     run = tmp_path / 'run'
     env = prepare(run, scenario, Path('/not-used/claude'))
     return run, env, scenario
+
+
+@pytest.fixture(autouse=True)
+def offline_plugin_cli(monkeypatch, request):
+    """Model only plugin installation offline; live tests use the real prepare path."""
+    if request.node.get_closest_marker('eval_live'):
+        return
+    from evals import runner
+    original = subprocess.run
+
+    def run(command, *args, **kwargs):
+        if isinstance(command, list) and len(command) > 1 and command[1] == 'plugin':
+            home = Path(kwargs['env']['HOME'])
+            cache = home / '.claude/plugins/cache/k8s-upgrade-skills/k8s-upgrade-skills/0.1.0'
+            if command[2] == 'install':
+                for name in ('.claude-plugin', 'hooks', 'k8s-upgrade-skills', 'helm-k8s-compat'):
+                    shutil.copytree(runner.REPO / name, cache / name,
+                                    ignore=shutil.ignore_patterns('__pycache__'))
+            output = json.dumps([{'id': 'k8s-upgrade-skills@k8s-upgrade-skills',
+                                  'enabled': True}]) if command[2] == 'list' else 'installed\n'
+            return subprocess.CompletedProcess(command, 0, output, '')
+        return original(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', run)

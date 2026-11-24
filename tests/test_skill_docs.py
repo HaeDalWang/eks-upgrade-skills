@@ -212,3 +212,19 @@ def test_report_is_written_by_script(name):
     if name == "final.md":
         gate = next(i for i, c in enumerate(cmds) if c.startswith("python3 scripts/phase_gate.py phase7"))
         assert gate < report[0]
+
+
+def test_plugin_manifest_paths_and_hook_command_exist():
+    root = SKILL_ROOT.parent
+    plugin = json.loads((root / '.claude-plugin/plugin.json').read_text())
+    marketplace = json.loads((root / '.claude-plugin/marketplace.json').read_text())
+    hooks = json.loads((root / 'hooks/hooks.json').read_text())
+    assert plugin['name'] == marketplace['name'] == 'k8s-upgrade-skills'
+    assert plugin['skills'] == ['./k8s-upgrade-skills', './helm-k8s-compat']
+    assert all((root / path / 'SKILL.md').is_file() for path in plugin['skills'])
+    assert marketplace['plugins'] == [{'name': plugin['name'], 'source': './'}]
+    entry = hooks['hooks']['PreToolUse'][0]
+    assert entry['matcher'] == 'Bash'
+    command = entry['hooks'][0]['command'].replace('${CLAUDE_PLUGIN_ROOT}', str(root))
+    executable, path = shlex.split(command)
+    assert executable == 'python3' and Path(path).is_file()

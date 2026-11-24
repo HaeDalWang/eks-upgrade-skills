@@ -81,13 +81,15 @@ Fargate 프로파일 정의(IaC) 자체는 변경하지 않습니다. 다만 Con
 
 ## 설치 및 도구
 
-### Q: install.sh가 기존 AI 도구 설정을 건드리나요?
+### Q: 어떻게 설치하고 무엇이 함께 설치되나요?
 
-아닙니다. `install.sh`는 각 도구의 전역 스킬 경로(예: `~/.claude/skills/`)에 `k8s-upgrade-skills/` 디렉토리를 복사하는 것이 전부입니다. MCP 설정, 도구 설정 파일 등은 일절 수정하지 않습니다.
+[README 설치 절차](README.md#2-설치)의 marketplace 명령으로 plugin을 설치합니다. `k8s-upgrade-skills`,
+`helm-k8s-compat`와 Bash PreToolUse hook이 함께 설치됩니다. Hook은 스킬 실행 중 saved planfile의
+`APPLY-GUARD PASS`와 현재 sha256이 일치해야 apply를 허용합니다.
 
 ### Q: 여러 AI 도구에 동시에 설치해도 되나요?
 
-네. 각 도구의 스킬 경로가 다르기 때문에 충돌 없이 동시 설치 가능합니다. `./install.sh --all`로 한 번에 설치할 수 있습니다.
+네. Claude Code와 Codex CLI 각각의 plugin 명령으로 설치합니다. Codex에서는 `/hooks`에서 hook을 신뢰해야 합니다.
 
 ---
 
@@ -105,7 +107,7 @@ Phase 0 사전 검증의 COM-004 규칙에서 EKS Insights의 `UPGRADE_READINESS
 
 ### Q: 설치된 Helm 차트가 대상 K8s 버전을 지원하는지 미리 알 수 있나요?
 
-`helm-k8s-compat` 스킬(install.sh로 함께 설치됨)이 이 역할을 합니다. `helm ls`로 설치된 Release를 수집한 뒤, De-facto 표준 차트 31종을 큐레이션한 registry와 대조하여 호환성 문제를 검출합니다. "Helm 차트 호환성 점검해줘"로 단독 실행하거나, 업그레이드 Phase 0 보조로 사용할 수 있습니다.
+`helm-k8s-compat` 스킬(plugin에 함께 포함됨)이 이 역할을 합니다. `helm ls`로 설치된 Release를 수집한 뒤, De-facto 표준 차트 31종을 큐레이션한 registry와 대조하여 호환성 문제를 검출합니다. "Helm 차트 호환성 점검해줘"로 단독 실행하거나, 업그레이드 Phase 0 보조로 사용할 수 있습니다.
 
 현재/대상 버전을 같게 주면(`--current 1.35 --target 1.35`) 업그레이드 없이 **지금 상태만 점검**합니다. 차트는 클러스터가 가만히 있어도 EOL을 맞고 지원 매트릭스는 새 K8s가 나오면서 바뀌므로, 주기적으로 돌려 현재 버전 기준으로 이미 지원 범위를 벗어난 차트를 찾는 용도입니다.
 
