@@ -84,8 +84,6 @@ python3 scripts/phase_gate.py phase3 \
   --audit-log audit.log
 ```
 
-(No `--target-version`: phase3 rejects it.)
-
 `CONFLICT` FAIL: follow the PRESERVE guidance in `NEXT`, STOP and write the failure report; only the operator changes Terraform.
 
 **WARN (exit 2), add-ons still `UPDATING`**: add-ons reconcile one after another (commonly vpc-cni →

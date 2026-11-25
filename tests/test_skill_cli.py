@@ -54,10 +54,8 @@ def test_skill_command_extraction_includes_every_script(monkeypatch):
     }
 
 
-def test_phase3_target_version_is_rejected_before_execution(monkeypatch):
-    with pytest.raises(SystemExit) as exc:
-        parse_without_execution(monkeypatch, [
-            "scripts/phase_gate.py", "phase3", "--cluster-name", "test",
-            "--target-version", "1.34",
-        ])
-    assert exc.value.code == 1
+def test_phase3_accepts_common_target_version(monkeypatch):
+    parse_without_execution(monkeypatch, [
+        "scripts/phase_gate.py", "phase3", "--cluster-name", "test",
+        "--target-version", "1.34",
+    ])
