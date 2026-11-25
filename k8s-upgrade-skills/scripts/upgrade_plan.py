@@ -142,6 +142,14 @@ def render(doc):
     for step in doc["steps"]:
         cells = [step["id"], step["type"], ", ".join(step["targets"]), json.dumps(step["expect"], ensure_ascii=False)]
         lines.append("| " + " | ".join(c.replace("|", "\\|") for c in cells) + " |")
+    lines.extend(["", "## Apply commands", ""])
+    for step in doc["steps"]:
+        prefix = doc.get("auth_prefix", "unknown (auth_prefix absent from plan doc)")
+        planfile = step.get("planfile", "unknown (planfile absent from plan doc)")
+        saved = str(Path(doc["tf_dir"]) / planfile) if not planfile.startswith("unknown (") else planfile
+        command = "cd {} && {}terraform apply {}".format(
+            shlex.quote(doc["tf_dir"]), (prefix + " ") if prefix else "", shlex.quote(saved))
+        lines.extend(["### " + step["id"], "", "```bash", command, "```", ""])
     lines.extend(["", "## " + ("모범사례 이탈" if ko else "Deviations"), ""])
     lines.extend(["- " + d["reason"] for d in doc["deviations"]] or ["없음" if ko else "None"])
     lines.extend(["", " / ".join(APPROVALS[doc["output_language"]]), ""])

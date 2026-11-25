@@ -22,7 +22,7 @@ if args and Path(args[0]).name == 'gate_check.py':
             state['preflight_runs'] = count + 1
             (run / 'state.json').write_text(json.dumps(state))
 tracked = bool(args and Path(args[0]).name in (
-    'phase_gate.py', 'gate_check.py', 'plan_check.py', 'apply_guard.py', 'upgrade_plan.py', 'discover.py'))
+    'phase_gate.py', 'gate_check.py', 'plan_check.py', 'apply_guard.py', 'apply_confirm.py', 'report.py', 'upgrade_plan.py', 'discover.py'))
 result = subprocess.run([sys.executable, *args], check=False,
                         capture_output=tracked, text=tracked)
 if tracked:

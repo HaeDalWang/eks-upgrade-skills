@@ -40,6 +40,12 @@ python3 k8s-upgrade-skills/scripts/apply_guard.py \
   --planfile /path/to/terraform/cp.tfplan --step cp \
   --cluster-name my-cluster --target-version 1.34 --audit-log audit.log
 
+# 사용자 직접 apply 후 state 확인 (guard가 PASS인 동일 saved plan)
+python3 k8s-upgrade-skills/scripts/apply_confirm.py \
+  --planfile /path/to/terraform/cp.tfplan --plan-doc upgrade-plan.json \
+  --tf-dir /path/to/terraform --auth-prefix "" \
+  --cluster-name my-cluster --target-version 1.34 --audit-log audit.log
+
 # 인라인 드레인 모니터 — 메인 에이전트가 run_in_background로 실행 (sub-agent 아님)
 python3 k8s-upgrade-skills/scripts/drain_watch.py \
   --phase P4 --scope all --audit-log audit.log
@@ -98,6 +104,7 @@ k8s-upgrade-skills/          ← AI Agent가 읽는 스킬 디렉토리 (plugin�
 ├── steps/                   ← Phase별 자기완결 절차 (각 파일은 upgrade_plan.py next로 시작)
 │   ├── start.md             ← discover → Phase 0 → 인터뷰 → recipe → plan → 승인
 │   ├── cp.md / addons.md / nodes.md / karpenter.md / full.md  ← Phase 1+2 / 3 / 4 / 5 / 6
+│   ├── user-apply.md        ← 사용자 직접 실행: guard → 명령 표시 → 대기 → state 확인
 │   ├── final.md             ← Phase 7 + Fargate 갱신 + report.py
 │   └── failure.md           ← FAIL 시 대응 + 실패 보고서
 ├── scripts/
@@ -108,6 +115,7 @@ k8s-upgrade-skills/          ← AI Agent가 읽는 스킬 디렉토리 (plugin�
 │   ├── upgrade_plan.py      ← 계획 create/approve/next/done/skip (audit.log 기반 진행)
 │   ├── plan_check.py        ← saved Terraform plan JSON 허용 목록·목표 버전·AMI 검증
 │   ├── apply_guard.py       ← apply 직전 plan 해시·drain monitor·CP 상태 검증
+│   ├── apply_confirm.py     ← 사용자 apply state 비교·USER-APPLY 기록
 │   ├── drain_watch.py       ← 인라인 드레인 모니터 (백그라운드 폴링: 이벤트/PDB/NodeClaim → DRAIN-P*)
 │   ├── service_watch.py     ← 인라인 서비스 모니터 (EndpointSlice ready + HTTP health → SVC-P*)
 │   ├── audit_event.py       ← 단일 이벤트 audit.log 기록 CLI (lib.audit_append 래퍼)

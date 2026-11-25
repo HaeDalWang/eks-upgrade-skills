@@ -1,4 +1,6 @@
 """report.py: deterministic report tables scoped to the current approved plan; no infrastructure."""
+import json
+
 import upgrade_plan as up
 import report
 from lib import audit_append, parse_audit_line
@@ -122,3 +124,25 @@ def test_failed_run_gets_failed_name_and_reports_never_overwrite(tmp_path, monke
     second = first.with_name(first.stem + "-2.md")
     assert "<!-- NARRATIVE:summary" in second.read_text()
     assert up.fields(last_row(audit)["detail"])["output"] == str(second)
+
+
+def test_executor_user_is_bound_to_step_and_current_run(tmp_path):
+    path, audit = make_plan(tmp_path)
+    _, _, meta, _, _ = up.current(path, audit)
+    audit_append(str(audit), "USER-APPLY", "PASS", up.detail_fields(**meta, step_id="cp", step="cp"))
+    finish(path, audit, "cp")
+    audit_append(str(audit), "USER-APPLY", "WARN", up.detail_fields(**meta, step_id="full", step="full"))
+    finish(path, audit, "full")
+    out = tmp_path / "user.md"
+    assert run(path, audit, out) == 0
+    assert any(line.startswith('| cp | cp |') and line.endswith('| user |') for line in out.read_text().splitlines())
+    assert any(line.startswith('| full | full |') and line.endswith('| agent |') for line in out.read_text().splitlines())
+    # A later target reuses the path and step ids but has its own execution scope.
+    doc = json.loads(path.read_text())
+    doc.update(current_version="1.35", target_version="1.36")
+    path.write_text(json.dumps(doc))
+    seed_preflight(audit, target="1.36")
+    assert up.main(["approve", "--plan-doc", str(path), "--audit-log", str(audit), "--answer", "승인"]) == 0
+    out = tmp_path / "again.md"
+    assert run(path, audit, out) == 0
+    assert '| user |' not in out.read_text()

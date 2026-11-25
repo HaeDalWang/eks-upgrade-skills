@@ -105,6 +105,8 @@ After approval, set `PLAN_DOC` to the absolute approved plan path. Then repeat:
 | `full` | [steps/full.md](steps/full.md) | 6 | `phase_gate.py phase6` |
 | `null` | [steps/final.md](steps/final.md) | 7 | `phase_gate.py phase7` (writes the report) |
 
+If the user runs an apply, follow [steps/user-apply.md](steps/user-apply.md): guard → literal command → wait → apply_confirm → gate.
+
 3. Finish the step with `upgrade_plan.py done --step-id <id>` only where the file says, after its gate
    PASS. Never pick a different step than `next` printed; an approved custom `--order` runs in its order.
 

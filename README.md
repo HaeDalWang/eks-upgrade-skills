@@ -227,7 +227,7 @@ EKS 업그레이드는 위험하고, 단계가 많고, 오래 걸립니다. 이 
 ├── k8s-upgrade-skills/        # 업그레이드 스킬
 │   ├── SKILL.md               #   진입점: 시작 흐름, 절대 규칙, 단계 루프
 │   ├── steps/                 #   단계별 절차 (start·cp·addons·nodes·karpenter·full·final·failure)
-│   ├── scripts/               #   조사·계획·게이트·감시·보고 스크립트 (discover, upgrade_plan, gate_check, phase_gate, plan_check, apply_guard, report …)
+│   ├── scripts/               #   조사·계획·게이트·감시·보고 스크립트 (discover, upgrade_plan, gate_check, phase_gate, plan_check, apply_guard, apply_confirm, report …)
 │   ├── docs/                  #   백그라운드 감시 설계 근거
 │   └── schemas/               #   recipe.yaml IDE 스키마
 ├── helm-k8s-compat/           # Helm 차트 호환성 점검 스킬 (scripts/, registry/)
@@ -238,3 +238,5 @@ EKS 업그레이드는 위험하고, 단계가 많고, 오래 걸립니다. 이 
 ├── hooks/                     # Bash PreToolUse APPLY-GUARD hook
 └── QnA.md
 ```
+
+`apply_confirm.py`: 사용자 직접 saved-plan apply 후 state 확인과 `USER-APPLY` 기록 ([절차](k8s-upgrade-skills/steps/user-apply.md)).
