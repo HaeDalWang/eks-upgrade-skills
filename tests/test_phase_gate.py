@@ -1492,7 +1492,7 @@ class TestClassifyPods:
             },
         }
         pods = {"items": [pod]}
-        result = phase_gate.classify_pods(pods, {"items": []}, now=now)
+        result = phase_gate.classify_pods(pods, {"items": [{"metadata": {"name": "node-1"}}]}, now=now)
         assert len(result.blocking) == 1
         assert result.blocking[0]["ns"] == "workload"
         assert "sidecar" in result.blocking[0]["reason"]
@@ -1513,7 +1513,7 @@ class TestClassifyPods:
             },
         }
         pods = {"items": [pod]}
-        result = phase_gate.classify_pods(pods, {"items": []}, now=now)
+        result = phase_gate.classify_pods(pods, {"items": [{"metadata": {"name": "node-1"}}]}, now=now)
         assert len(result.transient) == 1
         assert result.transient[0]["name"] == "new-pod"
         assert result.blocking == []
@@ -1533,7 +1533,7 @@ class TestClassifyPods:
             },
         }
         now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
-        result = phase_gate.classify_pods({"items": [pod]}, {"items": []}, now=now)
+        result = phase_gate.classify_pods({"items": [pod]}, {"items": [{"metadata": {"name": "node-1"}}]}, now=now)
         assert result.transient == []
         assert result.stale == []
         assert result.blocking == []
