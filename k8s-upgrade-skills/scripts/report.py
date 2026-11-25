@@ -30,7 +30,7 @@ TEXT = {
         failed="❌ Phase {}에서 실패", stopped="⏸ 미완료 — 마지막 Phase {}", open="⏸ 미완료 — Phase {} 진행 중 중단",
         none="⏸ 미완료 — 실행된 Phase 없음",
         phases="Phase 타임라인 (UTC)", phase_cols="| Phase | 시작 | 종료 | 소요 | 결과 | 실행 횟수 |",
-        steps="계획 단계", step_cols="| ID | 유형 | 상태 | 시각 (UTC) | 비고 |",
+        steps="계획 단계", step_cols="| ID | 유형 | 상태 | 시각 (UTC) | 비고 | Executor |",
         done="완료", skipped="건너뜀", not_reached="미도달",
         applies="Apply 가드 기록", apply_cols="| 시각 (UTC) | 단계 | planfile | 결과 | 상세 |",
         events="감시 이벤트 (DRAIN-*/SVC-* WARN/FAIL)", event_cols="| 시각 (UTC) | 모니터 | 결과 | 상세 |",
@@ -48,7 +48,7 @@ TEXT = {
         failed="❌ Failed at Phase {}", stopped="⏸ Incomplete — last phase {}", open="⏸ Incomplete — stopped during Phase {}",
         none="⏸ Incomplete — no phase ran",
         phases="Phase timeline (UTC)", phase_cols="| Phase | Start | End | Duration | Result | Runs |",
-        steps="Plan steps", step_cols="| ID | Type | Status | Time (UTC) | Note |",
+        steps="Plan steps", step_cols="| ID | Type | Status | Time (UTC) | Note | Executor |",
         done="done", skipped="skipped", not_reached="not reached",
         applies="Apply guard records", apply_cols="| Time (UTC) | Step | planfile | Result | Detail |",
         events="Monitor events (DRAIN-*/SVC-* WARN/FAIL)", event_cols="| Time (UTC) | Monitor | Result | Detail |",
@@ -167,15 +167,19 @@ def table(header, rows, text):
 
 def step_rows(doc, scoped, digest, text):
     finished = {}
+    users = set()
     for row in scoped:
         meta = fields(row["detail"])
         if meta.get("plan_sha256") != digest:
             continue
+        if (row["rule_id"], row["result"]) == ("USER-APPLY", "PASS"):
+            users.add(meta.get("step_id"))
         if (row["rule_id"], row["result"]) == ("STEP-DONE", "PASS"):
             finished[meta.get("step_id")] = (text["done"], row["timestamp"], "")
         elif (row["rule_id"], row["result"]) == ("DEVIATION", "SKIP"):
             finished[meta.get("step_id")] = (text["skipped"], row["timestamp"], meta.get("reason", ""))
-    return [[s["id"], s["type"], *finished.get(s["id"], (text["not_reached"], "-", ""))]
+    return [[s["id"], s["type"], *finished.get(s["id"], (text["not_reached"], "-", "")),
+             "user" if s["id"] in users else "agent"]
             for s in doc["steps"]]
 
 

@@ -3274,6 +3274,17 @@ class TestRolloutRetry:
         if age == 1801:
             assert "rollout exceeded 30 minutes" in audit.read_text()
 
+    @pytest.mark.parametrize("result,expected", [("PASS", 2), ("WARN", 2), ("FAIL", 1)])
+    def test_user_apply_anchors_rollout_window(self, rollout, result, expected):
+        # User path: guard ran long ago, the user's apply (USER-APPLY) is recent.
+        from datetime import datetime, timedelta, timezone
+        audit, seed, mock_commands = rollout
+        seed(3600)
+        recent = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+        audit.write_text(audit.read_text() + f"{recent} | USER-APPLY | - | {result} | user ran apply\n")
+        mock_commands(5)
+        assert phase_gate.gate_phase5("1.35", str(audit)) == expected
+
     @pytest.mark.parametrize("blocking", [False, True], ids=["failed_evict", "blocking_pod"])
     def test_phase4_failure_overrides_rollout_retry(self, rollout, capsys, blocking):
         audit, seed, mock_commands = rollout

@@ -50,7 +50,7 @@ def test_skill_command_extraction_includes_every_script(monkeypatch):
     assert {Path(args[0]).name for args in commands} == {
         "gate_check.py", "phase_gate.py", "drain_watch.py", "service_watch.py",
         "audit_event.py", "plan_check.py", "apply_guard.py", "upgrade_plan.py",
-        "discover.py", "report.py",
+        "discover.py", "report.py", "apply_confirm.py",
     }
 
 

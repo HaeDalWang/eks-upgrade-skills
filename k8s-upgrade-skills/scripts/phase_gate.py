@@ -461,7 +461,9 @@ def rollout_result(audit_log: str, in_progress: bool, detail: str) -> tuple:
     path = Path(audit_log)
     rows = [row for line in path.read_text(encoding="utf-8").splitlines()
             if (row := parse_audit_line(line))
-            and row["rule_id"] == "APPLY-GUARD" and row["result"] == "PASS"] if path.exists() else []
+            # A user apply may start long after its guard; USER-APPLY marks when it really ran.
+            and (row["rule_id"], row["result"]) in (("APPLY-GUARD", "PASS"), ("USER-APPLY", "PASS"),
+                                                    ("USER-APPLY", "WARN"))] if path.exists() else []
     if not rows:
         return 1, detail + "; apply time unknown: no APPLY-GUARD PASS"
     try:

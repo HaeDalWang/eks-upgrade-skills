@@ -58,6 +58,7 @@ python3 scripts/apply_guard.py --planfile "${TF_DIR}/full.tfplan" --plan-doc "${
 ```
 
 Call 2: only after Call 1 exits 0, use a separate Bash call with `run_in_background: true`.
+User runs this apply → follow [user-apply.md](user-apply.md) here, then return to this step.
 Substitute actual literal values for `<TF_DIR>` and `<AUTH_PREFIX>` (omit an empty prefix); quote paths as needed.
 The hook denies `$`/subshells in an apply command.
 

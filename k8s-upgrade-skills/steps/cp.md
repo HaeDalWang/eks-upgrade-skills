@@ -98,6 +98,7 @@ python3 scripts/apply_guard.py --planfile "${TF_DIR}/cp.tfplan" --plan-doc "${PL
 ```
 
 Call 2: only after Call 1 exits 0, use a separate Bash call with `run_in_background: true`.
+User runs this apply → follow [user-apply.md](user-apply.md) here, then return to this step.
 Substitute actual literal values for `<TF_DIR>` and `<AUTH_PREFIX>` (omit an empty prefix); quote paths as needed.
 The hook denies `$`/subshells in an apply command.
 
@@ -132,6 +133,7 @@ update. Do not abort:
    ```
 
    Call 2: only after Call 1 exits 0, use a separate Bash call with `run_in_background: true`.
+   User runs this apply → follow [user-apply.md](user-apply.md) here, then return to this step.
    Substitute actual literal values for `<TF_DIR>` and `<AUTH_PREFIX>` (omit an empty prefix); quote paths as needed.
    The hook denies `$`/subshells in an apply command.
 
@@ -176,6 +178,7 @@ ${AUTH_PREFIX} aws eks list-nodegroups --cluster-name "${CLUSTER_NAME}" --output
   ```
 
   Call 2: only after Call 1 exits 0, use a separate Bash call with `run_in_background: true`.
+  User runs this apply → follow [user-apply.md](user-apply.md) here, then return to this step.
   Substitute actual literal values for `<TF_DIR>` and `<AUTH_PREFIX>` (omit an empty prefix); quote paths as needed.
   The hook denies `$`/subshells in an apply command.
 

@@ -1,6 +1,9 @@
 """Sandbox preparation and opt-in multi-turn Claude runner (stdlib only)."""
 import argparse
 import json
+import fcntl
+import shlex
+import hashlib
 import os
 import re
 import shutil
@@ -296,12 +299,62 @@ def rule_matches(run, scenario, last):
             yield rule, sum(u.get('rule') == rule['id'] and u['status'] == 'SENT' for u in sent)
 
 
+def answer_effect(run, scenario, last, user):
+    """Only the configured completion answer can apply the literal, currently guarded plan."""
+    if (not scenario.get('user_apply_answer') or user.get('status') != 'SENT'
+            or user.get('id') != scenario['user_apply_answer']):
+        return
+    from argparse import Namespace
+    from apply_confirm import guarded
+    from upgrade_plan import current, fields, records
+    from evals.shim import user_apply
+    project = (run / 'project').resolve()
+    audit = project / 'audit.log'
+    approvals = [r for r in records(audit) if r['rule_id'] == 'PLAN-APPROVED' and r['result'] == 'PASS']
+    if not approvals:
+        raise ValueError('user apply requires PLAN-APPROVED')
+    doc_path = Path(fields(approvals[-1]['detail'])['plan_doc']).resolve()
+    if not doc_path.is_relative_to(project):
+        raise ValueError('plan doc outside eval project')
+    doc, step, _, _, _ = current(doc_path, audit)
+    if step['type'] != 'cp':
+        raise ValueError('fake user apply is restricted to the CP step')
+    guards = [r for r in records(audit) if r['rule_id'] == 'APPLY-GUARD']
+    if not guards:
+        raise ValueError('user apply requires APPLY-GUARD')
+    saved = Path(fields(guards[-1]['detail'])['planfile']).resolve()
+    if not saved.is_relative_to(project):
+        raise ValueError('user planfile outside eval project')
+    args = Namespace(plan_doc=str(doc_path), audit_log=str(audit), cluster_name=doc['cluster'],
+                     target_version=doc['target_version'], tf_dir=str(project))
+    guarded(args, saved, hashlib.sha256(saved.read_bytes()).hexdigest())
+    expected = ['cd', str(project), '&&', 'terraform', 'apply', str(saved)]
+    literal = False
+    for line in last.splitlines():
+        try:
+            literal = literal or shlex.split(line.strip().strip('`')) == expected
+        except ValueError:
+            continue
+    if not literal:
+        raise ValueError('fake user requires the exact literal apply command before completion')
+    with (run / 'state.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = json.loads((run / 'state.json').read_text())
+        data = json.loads(saved.read_text())
+        user_apply(data, state, scenario, partial=scenario.get('user_apply_partial', False))
+        (run / 'state.json').write_text(json.dumps(state))
+        append(run / 'calls.jsonl', dict(tool='user', argv=['apply', str(saved)],
+            cwd=str(project), ts=now(), exit=0, stderr='', effects=state['last_effects'],
+            audit_lines=len(audit.read_text().splitlines()), plan_changes=data['resource_changes']))
+
+
 def deterministic_answer(run, scenario, last, turn):
     for rule, count in rule_matches(run, scenario, last):
         selector = rule['answer_ids'][min(count, len(rule['answer_ids']) - 1)]
         user = answer(last, scenario['answers'], selector)
         if user['status'] != 'SENT':
             raise ValueError('unknown deterministic answer: ' + selector)
+        answer_effect(run, scenario, last, user)
         append(run / 'user.jsonl', {**user, 'turn': turn + 1, 'attempt': 1, 'rule': rule['id']})
         return user
     return None
@@ -332,6 +385,7 @@ def select_answer(run, scenario, claude, env, deadline, last, turn):
         append(run / 'user.jsonl', {**user, 'turn': turn + 1, 'attempt': attempt,
                                    'status': 'RETRY' if retrying else user['status']})
         if not retrying:
+            answer_effect(run, scenario, last, user)
             return user
 
 

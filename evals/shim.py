@@ -521,6 +521,12 @@ def configuration(topology):
     return {'root_module': {'module_calls': calls, 'resources': resources}}
 
 
+def state_resources(module):
+    yield from module.get('resources', [])
+    for child in module.get('child_modules', []):
+        yield from state_resources(child)
+
+
 def prior_state(state, scenario):
     """Applied resources as terraform show -json reports them (current, not desired)."""
     topology = state['topology']
@@ -541,8 +547,10 @@ def prior_state(state, scenario):
             'resources': [{'address': MNG_ADDRESS, 'type': 'aws_eks_node_group', 'values': {
                 'release_version': state['ami_alias'], 'ami_type': 'AL2023_x86_64_STANDARD',
                 'version': state['node_version']}}]}]
-    return {'format_version': '1.0', 'terraform_version': '1.13.0',
-            'values': {'root_module': {'resources': resources, 'child_modules': children}}}
+    root = dict(resources=resources, child_modules=children)
+    for resource in state_resources(root):
+        resource['mode'] = 'managed'
+    return {'format_version': '1.0', 'terraform_version': '1.13.0', 'values': {'root_module': root}}
 
 
 def plan(project, args, state, scenario):
@@ -592,7 +600,8 @@ def plan(project, args, state, scenario):
     return {'format_version': '1.2', 'terraform_version': '1.13.0',
             'variables': {key: {'value': value} for key, value in values.items()},
             'configuration': configuration(state['topology']),
-            'prior_state': prior_state(state, scenario), 'resource_changes': changes}
+            'prior_state': prior_state(state, scenario),
+            'resource_changes': [{**change, 'mode': 'managed'} for change in changes]}
 
 
 def apply_changes(changes, state, scenario):
@@ -639,6 +648,30 @@ def apply_changes(changes, state, scenario):
         else:
             raise ValueError('terraform resource type: ' + entry['type'])
     state['last_effects'] = effects
+
+
+def save_tf_state(data, changes, state):
+    snapshot = json.loads(json.dumps(state.get('tf_state', data['prior_state'])))
+    root = snapshot['values']['root_module']
+    by_address = {r['address']: r for r in state_resources(root)}
+    for entry in changes:
+        address = entry['address']
+        if address not in by_address:
+            by_address[address] = {'address': address, 'mode': 'managed', 'type': entry['type']}
+            root.setdefault('resources', []).append(by_address[address])
+        by_address[address]['values'] = {**by_address[address].get('values', {}), **entry['change']['after']}
+    state['tf_state'] = snapshot
+
+
+def user_apply(data, state, scenario, partial=False):
+    """A fake user's terminal applies a guarded saved plan; never an agent terraform call."""
+    changes = data['resource_changes'][:1] if partial else data['resource_changes']
+    apply_changes(changes, state, scenario)
+    save_tf_state(data, changes, state)
+    # Successful terraform apply waits for the provider's CP operation before returning.
+    if not partial and 'control_plane' in state['last_effects']:
+        state.update(version=state['cp_target'], status='ACTIVE')
+        state.pop('cp_remaining', None)
 
 
 def cp_conflict():
@@ -693,7 +726,7 @@ def terraform(args, state, scenario, project):
         return '\n'.join(addresses), 0
     if operation == 'show':
         paths = [v for v in args[1:] if not v.startswith('-')]
-        data = json.loads((project / paths[0]).read_text()) if paths else state.get('last_plan', {})
+        data = json.loads((project / paths[0]).read_text()) if paths else state.get('tf_state', prior_state(state, scenario))
         return (json.dumps(data) if '-json' in args else plan_text(data)), 0
     if operation == 'apply':
         if scenario['transitions'].get('cp_409') and state['status'] == 'UPDATING':
@@ -707,6 +740,7 @@ def terraform(args, state, scenario, project):
         changes = [c for c in changes if c['type'] != 'aws_eks_cluster' or
                    c['change']['after']['version'] != state.get('cp_target', state['version'])]
         apply_changes(changes, state, scenario)
+        save_tf_state(data, changes, state)
         if scenario['transitions'].get('cp_409') and 'control_plane' in state['last_effects']:
             state['last_error'] = cp_conflict()
             return '', 1

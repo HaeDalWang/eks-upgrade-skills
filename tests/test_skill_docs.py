@@ -38,7 +38,7 @@ def test_skill_md_stays_short():
 
 def test_expected_step_files_exist():
     assert {p.name for p in STEPS} == {"start.md", "cp.md", "addons.md", "nodes.md", "karpenter.md",
-                                       "full.md", "final.md", "failure.md"}
+                                       "full.md", "final.md", "failure.md", "user-apply.md"}
 
 
 @pytest.mark.parametrize("phase", sorted(OWNER))
@@ -139,7 +139,7 @@ DISCOVERY_VARS = {"CLUSTER_VERSION_VAR", "CLUSTER_VERSION_FILE", "MNG_AMI_VAR", 
                   "KARPENTER_AMI_VAR", "KARPENTER_AMI_FILE", "EKS_MODULE", "CLUSTER_NAME", "TF_DIR"}
 
 
-@pytest.mark.parametrize("path", [p for p in STEPS if p.name not in ("start.md", "failure.md")],
+@pytest.mark.parametrize("path", [p for p in STEPS if p.name not in ("start.md", "failure.md", "user-apply.md")],
                          ids=lambda p: p.name)
 def test_step_files_rederive_discovery_variables_before_first_section(path):
     text = path.read_text()
@@ -228,3 +228,13 @@ def test_plugin_manifest_paths_and_hook_command_exist():
     command = entry['hooks'][0]['command'].replace('${CLAUDE_PLUGIN_ROOT}', str(root))
     executable, path = shlex.split(command)
     assert executable == 'python3' and Path(path).is_file()
+
+
+def test_user_apply_preserves_guard_wait_confirm_order_at_every_site():
+    text = (SKILL_ROOT / "steps/user-apply.md").read_text()
+    assert text.index("`plan_check.py`") < text.index("`apply_guard.py`") < text.index("2. Show")
+    assert text.index("Wait for the user's reply") < text.index("python3 scripts/apply_confirm.py")
+    assert '그냥 너가 해' in text and 'phase gate' in text
+    for name in ("cp", "addons", "nodes", "karpenter", "full"):
+        text = (SKILL_ROOT / "steps" / (name + ".md")).read_text()
+        assert text.count('Call 2:') == text.count('[user-apply.md](user-apply.md)')

@@ -13,6 +13,7 @@ from .safety_checks import SAFETY_ASSERTIONS, safety_checks
 from .scenario_checks import scenario_checks
 from .batch2_checks import batch2_checks
 from .backlog_checks import backlog_checks
+from .user_apply_checks import user_apply_checks
 from .plan_checks import PLAN_ASSERTIONS, plan_checks
 
 
@@ -178,6 +179,8 @@ def grade(run):
         safety_checks(check, calls, audit, users)
     if scenario.get('safety_checks_version', 0) >= 3:
         plan_checks(check, run, audit, scenario, applies)
+    if scenario['id'] == 'user-apply':
+        user_apply_checks(check, run, calls, audit)
     missing = set(assertions) - result.keys()
     if missing:
         raise ValueError(f'unknown assertions: {sorted(missing)}')

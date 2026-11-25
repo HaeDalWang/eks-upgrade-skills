@@ -452,3 +452,15 @@ def test_finished_plan_prints_null_and_next_hop_plans_in_same_dir_and_audit_log(
     assert json.loads(capsys.readouterr().out)["id"] == "cp"
     assert invoke("next", path, audit) == 0
     assert capsys.readouterr().out == "null\n"
+
+
+def test_apply_command_render_preview_without_mutation(tmp_path):
+    path, _ = make_plan(tmp_path)
+    original = path.read_bytes()
+    doc = up.load(path)[1]
+    rendered = up.render(doc)
+    assert rendered.count('terraform apply') == len(doc['steps'])
+    for step in doc['steps']:
+        assert "<AUTH_PREFIX> terraform apply {}".format(Path(doc['tf_dir']) / (step['type'] + '.tfplan')) in rendered
+    assert 'unknown' not in rendered.split('## Apply commands')[1].split('##')[0]
+    assert path.read_bytes() == original

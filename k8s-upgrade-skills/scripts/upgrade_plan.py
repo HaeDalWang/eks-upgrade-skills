@@ -142,6 +142,15 @@ def render(doc):
     for step in doc["steps"]:
         cells = [step["id"], step["type"], ", ".join(step["targets"]), json.dumps(step["expect"], ensure_ascii=False)]
         lines.append("| " + " | ".join(c.replace("|", "\\|") for c in cells) + " |")
+    lines.extend(["", "## Apply commands", "",
+                  "아래는 미리보기입니다. guard PASS 전에는 실행하지 마세요. 실제 명령은 apply 직전에 다시 보여 드립니다."
+                  if ko else "Preview only. Do not run before the guard PASSes; the exact command is shown again right before apply.",
+                  ""])
+    for step in doc["steps"]:
+        # Planfile names are fixed per step type by steps/*.md; auth prefix lives in the recipe, not the plan doc.
+        saved = str(Path(doc["tf_dir"]) / (step["type"] + ".tfplan"))
+        command = "cd {} && <AUTH_PREFIX> terraform apply {}".format(shlex.quote(doc["tf_dir"]), shlex.quote(saved))
+        lines.extend(["### " + step["id"], "", "```bash", command, "```", ""])
     lines.extend(["", "## " + ("모범사례 이탈" if ko else "Deviations"), ""])
     lines.extend(["- " + d["reason"] for d in doc["deviations"]] or ["없음" if ko else "None"])
     lines.extend(["", " / ".join(APPROVALS[doc["output_language"]]), ""])

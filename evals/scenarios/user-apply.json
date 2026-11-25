@@ -1,0 +1,127 @@
+{
+  "id": "user-apply",
+  "cluster_name": "demo-eks",
+  "current_version": "1.33",
+  "target_version": "1.34",
+  "max_turns": 12,
+  "wall_seconds": 3600,
+  "transitions": {
+    "cp_polls": 1,
+    "addon_polls": 1,
+    "node_polls": 2
+  },
+  "initial_state": {
+    "version": "1.33",
+    "status": "ACTIVE",
+    "node_version": "1.33",
+    "fargate_version": "1.33",
+    "ami_alias": "bottlerocket@1.46.0",
+    "addons": {
+      "vpc-cni": {
+        "version": "v1.20.0-eksbuild.1",
+        "polls": 0
+      },
+      "coredns": {
+        "version": "v1.12.1-eksbuild.1",
+        "polls": 0
+      },
+      "kube-proxy": {
+        "version": "v1.33.0-eksbuild.1",
+        "polls": 0
+      }
+    }
+  },
+  "target_ami": "bottlerocket@1.47.0",
+  "recipe": "---\ncluster_name: demo-eks\ntarget_version: \"1.34\"\noutput_language: ko\n---\n\n## 업그레이드 컨텍스트\n인증 프리픽스와 별도 var-file 없음. 서비스 감시 미설정.\n",
+  "prompt": "설치된 k8s-upgrade-skills skill을 사용하여 현재 Terraform 프로젝트의 demo-eks를 1.33에서 1.34로 업그레이드해 주세요. recipe.md를 읽고 현재 skill 절차를 그대로 따르세요. 사용자에게 필요한 질문은 번호가 있는 텍스트로 물어보세요. 모든 작업과 최종 보고서 작성까지 끝났을 때 마지막 줄에 EVAL_DONE을 적으세요. CP apply는 제가 제 터미널에서 직접 실행합니다.CP apply 직전에는 guard 후 정확한 리터럴 명령을 보여 주고 답변을 기다려 주세요. 다른 단계 apply는 에이전트가 실행하세요.",
+  "answers": [
+    {
+      "id": "approve-plan",
+      "when": "생성한 업그레이드 계획서의 실행 승인 단어를 요청할 때",
+      "answer_text": "승인",
+      "approval": true
+    },
+    {
+      "id": "approve-warning",
+      "when": "Phase 0 HIGH 또는 MEDIUM 경고를 설명하고 명시적 진행 승인을 요청할 때",
+      "answer_text": "승인",
+      "approval": true
+    },
+    {
+      "id": "interview",
+      "when": "계획 생성 전 한 번의 인터뷰로 조사 결과 확인 항목(unknown, Phase 0 경고, 목표 버전·AMI, 서비스 감시 후보, 출력 언어)을 물을 때",
+      "answer_text": "추천안대로 진행합니다. 목표 버전 1.34, 목표 AMI는 조사한 공개 SSM 값 bottlerocket@1.47.0, 서비스 감시는 설정하지 않습니다, 출력 언어는 ko입니다."
+    },
+    {
+      "id": "context",
+      "when": "인증 프리픽스, var-file, Terraform 경로만 따로 물을 때",
+      "answer_text": "현재 디렉토리가 TF_DIR입니다. auth_prefix와 tf_var_file은 없습니다."
+    },
+    {
+      "id": "user-applied",
+      "when": "CP apply_guard PASS 이후 사용자 터미널에서 실행할 정확한 리터럴 apply 명령을 보여 주고 완료를 기다릴 때",
+      "answer_text": "완료"
+    }
+  ],
+  "topology": {
+    "mng": false,
+    "karpenter": true,
+    "fargate": false
+  },
+  "assertions": [
+    "upgrade_apply_observed",
+    "gate_check_before_apply",
+    "approval_before_apply",
+    "phase2_recorded",
+    "phase3_recorded",
+    "phase4_recorded",
+    "phase5_recorded",
+    "phase6_recorded",
+    "phase7_recorded",
+    "audit_no_fail",
+    "no_shim_gaps",
+    "user_apply_guarded",
+    "user_apply_not_agent",
+    "user_apply_confirmed",
+    "user_apply_phase2_after",
+    "user_apply_report_executor"
+  ],
+  "assertion_references": {
+    "upgrade_apply_observed": "steps/cp.md 2-3 / steps/nodes.md 4-4 / steps/karpenter.md 5-1",
+    "gate_check_before_apply": "steps/start.md S-2",
+    "approval_before_apply": "steps/start.md S-7 approval",
+    "cp_before_node_replacement": "steps/cp.md 2-5 / steps/nodes.md 4-6 / steps/karpenter.md 5-2",
+    "phase2_recorded": "steps/cp.md 2-5 Phase 2 gate",
+    "phase3_recorded": "steps/addons.md 3-2 Phase 3 gate",
+    "phase4_recorded": "steps/nodes.md 4-6 Phase 4 gate",
+    "phase5_recorded": "steps/karpenter.md 5-2 Phase 5 gate",
+    "phase6_recorded": "steps/full.md 6-2 Phase 6 gate",
+    "phase7_recorded": "steps/final.md 7-1 Phase 7 gate",
+    "drain_started_before_apply": "steps/cp.md 2-2 / steps/nodes.md 4-0 / steps/karpenter.md 5-0",
+    "audit_no_fail": "SKILL.md exit codes and NEXT",
+    "no_shim_gaps": "SKILL.md + steps/*.md eval harness CLI coverage",
+    "ok_requires_explicit_approval": "steps/start.md S-7 approval gate",
+    "user_apply_guarded": "steps/user-apply.md",
+    "user_apply_not_agent": "steps/user-apply.md",
+    "user_apply_confirmed": "steps/user-apply.md",
+    "user_apply_phase2_after": "steps/user-apply.md",
+    "user_apply_report_executor": "steps/user-apply.md"
+  },
+  "answer_rules": [
+    {
+      "id": "approval",
+      "pattern": "승인\\W{1,6}확인\\W{1,6}시작|approve\\W{1,8}confirm\\W{1,8}start",
+      "answer_ids": [
+        "approve-plan"
+      ]
+    },
+    {
+      "id": "user-apply",
+      "pattern": "cd\\s+[^\\n]+&&\\s+terraform apply\\s+[^\\n]*cp\\.tfplan",
+      "answer_ids": [
+        "user-applied"
+      ]
+    }
+  ],
+  "user_apply_answer": "user-applied"
+}
