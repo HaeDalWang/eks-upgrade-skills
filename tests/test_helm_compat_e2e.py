@@ -17,7 +17,8 @@ CHECKER = REPO / "helm-k8s-compat" / "scripts" / "helm_compat_check.py"
 REGISTRY = REPO / "helm-k8s-compat" / "registry"
 
 
-def run_checker(tmp_path, releases, current, target, today="2026-06-26"):
+def run_checker(tmp_path, releases, current, target, today="2026-06-26",
+                pods=None, extra=()):
     """체커를 --releases-json 주입 모드로 실행하고 (returncode, audit내용)을 반환한다."""
     audit = tmp_path / "audit.log"
     proc = subprocess.run(
@@ -26,7 +27,9 @@ def run_checker(tmp_path, releases, current, target, today="2026-06-26"):
          "--registry-dir", str(REGISTRY),
          "--audit-log", str(audit),
          "--today", today,
-         "--releases-json", json.dumps(releases)],
+         "--releases-json", json.dumps(releases),
+         *(["--pods-json", json.dumps({"items": pods})] if pods is not None else []),
+         *map(str, extra)],
         capture_output=True, text=True)
     content = audit.read_text(encoding="utf-8") if audit.exists() else ""
     return proc.returncode, content, proc.stdout
@@ -248,3 +251,164 @@ class TestCurrentStateAuditMode:
     def test_downgrade_still_rejected(self, tmp_path):
         rc, _, _ = run_checker(tmp_path, [], current="1.36", target="1.35")
         assert rc == 64
+
+
+# H2/H4/H5/H6: offline observations use the same API objects as kubectl.
+def make_pod(release="app", namespace="apps", ready=2, phase="Running", name="app-0"):
+    return {"metadata": {"name": name, "namespace": namespace,
+                         "labels": {"app.kubernetes.io/instance": release}},
+            "spec": {"containers": [{"name": str(i)} for i in range(3)]},
+            "status": {"phase": phase,
+                       "containerStatuses": [{"name": str(i), "ready": i < ready}
+                                             for i in range(3)]}}
+
+
+def health_release():
+    return {"name": "app", "namespace": "apps", "chart": "custom-1.0.0"}
+
+
+class TestReleaseHealth:
+    def test_ready_two_of_three_warns_without_baseline(self, tmp_path):
+        rc, audit, out = run_checker(tmp_path, [health_release()], "1.33", "1.34",
+                                    pods=[make_pod()])
+        assert rc == 2
+        assert "READY 2/3" in audit and "baseline 없음" in audit
+        assert "NEXT:" in out.splitlines()[-1]
+
+    @pytest.mark.parametrize("phase", ["Pending", "Failed", "Unknown"])
+    def test_nonrunning_phase_warns_even_when_all_containers_ready(self, tmp_path, phase):
+        rc, audit, _ = run_checker(tmp_path, [health_release()], "1.33", "1.34",
+                                  pods=[make_pod(ready=3, phase=phase)])
+        assert rc == 2 and phase in audit
+
+    def test_missing_container_status_is_not_counted_as_ready(self, tmp_path):
+        pod = make_pod(ready=3)
+        pod["status"]["containerStatuses"].pop()
+        rc, audit, _ = run_checker(tmp_path, [health_release()], "1.33", "1.34", pods=[pod])
+        assert rc == 2 and "READY 2/3" in audit
+
+    def test_namespace_and_instance_filter_excludes_unrelated_pods(self, tmp_path):
+        rc, audit, _ = run_checker(
+            tmp_path, [health_release()], "1.33", "1.34",
+            pods=[make_pod(ready=3), make_pod(namespace="other"), make_pod(release="other")])
+        assert rc == 0 and "HELM-HEALTH" not in audit
+
+    def test_succeeded_all_ready_passes(self, tmp_path):
+        rc, _, _ = run_checker(tmp_path, [health_release()], "1.33", "1.34",
+                               pods=[make_pod(ready=3, phase="Succeeded")])
+        assert rc == 0
+
+    def test_existing_anomaly_info_new_anomaly_warn_and_worsening_warn(self, tmp_path):
+        baseline = tmp_path / "health.json"
+        release = health_release()
+        rc, _, _ = run_checker(tmp_path, [release], "1.33", "1.34", pods=[make_pod()],
+                               extra=["--health-out", baseline])
+        assert rc == 2
+        snapshot = json.loads(baseline.read_text())
+        assert snapshot["releases"]["apps/app"]["unhealthy"] == [
+            {"name": "app-0", "phase": "Running", "ready": "2/3"}]
+        (tmp_path / "audit.log").unlink()
+        rc, audit, _ = run_checker(tmp_path, [release], "1.34", "1.35", pods=[make_pod()],
+                                   extra=["--health-baseline", baseline])
+        assert rc == 0 and "기존 장애" in audit
+        (tmp_path / "audit.log").unlink()
+        rc, audit, _ = run_checker(tmp_path, [release], "1.34", "1.35",
+                                   pods=[make_pod(), make_pod(name="app-1")],
+                                   extra=["--health-baseline", baseline])
+        assert rc == 2 and "신규 장애" in audit and "기존 장애" in audit
+        rc, audit, _ = run_checker(tmp_path, [release], "1.34", "1.35",
+                                   pods=[make_pod(ready=1)], extra=["--health-baseline", baseline])
+        assert rc == 2 and "READY 1/3" in audit
+
+    @pytest.mark.parametrize("pods", [[], [make_pod(namespace="other"), make_pod(release="other")]])
+    def test_no_matching_pods_is_info_even_with_baseline(self, tmp_path, pods):
+        baseline = tmp_path / "health.json"
+        run_checker(tmp_path, [health_release()], "1.33", "1.34", pods=[],
+                    extra=["--health-out", baseline])
+        rc, audit, out = run_checker(tmp_path, [health_release()], "1.33", "1.34", pods=pods,
+                                     extra=["--health-baseline", baseline])
+        assert rc == 0 and "검사 범위 밖(일치 Pod 없음)" in audit
+        assert "INFO" in out and "unknown" not in audit
+
+    @pytest.mark.parametrize("payload", [{}, {"items": [None]}, {"items": [{}]}])
+    def test_malformed_pod_input_stops_with_next(self, tmp_path, payload):
+        proc = subprocess.run([sys.executable, str(CHECKER), "--current", "1.33",
+                               "--target", "1.34", "--registry-dir", str(REGISTRY),
+                               "--audit-log", str(tmp_path / "audit.log"),
+                               "--releases-json", json.dumps([health_release()]),
+                               "--pods-json", json.dumps(payload)], capture_output=True, text=True)
+        assert proc.returncode == 64
+        assert "Traceback" not in proc.stderr
+        assert proc.stdout.splitlines()[-1].startswith("NEXT:")
+
+    def test_malformed_baseline_is_not_treated_as_no_baseline(self, tmp_path):
+        baseline = tmp_path / "bad.json"
+        baseline.write_text('{"schema_version": 1, "releases": {"apps/app": {}}}')
+        rc, _, out = run_checker(tmp_path, [health_release()], "1.33", "1.34",
+                                 extra=["--health-baseline", baseline])
+        assert rc == 64 and out.splitlines()[-1].startswith("NEXT:")
+
+
+class TestRiskyValues:
+    @pytest.mark.parametrize("value, expected", [(True, 2), (False, 0), (1, 0), ("true", 0)])
+    def test_injected_values_work_without_live_reason_and_match_only_boolean_true(self, tmp_path, value, expected):
+        release = {"name": "ci", "namespace": "build", "chart": "jenkins-5.0.0",
+                   "values": {"controller": {"installLatestPlugins": value}}}
+        rc, audit, _ = run_checker(tmp_path, [release], "1.33", "1.34")
+        assert rc == expected
+        assert "HELM-VALUES" in audit
+        assert "risky_values 전용" in audit
+        assert ("HELM-SUPPORT | PASS" not in audit)
+        if expected == 0:
+            assert "위험 규칙 불일치" in audit
+
+    def test_absent_computed_values_path_is_info(self, tmp_path):
+        release = {"name": "ci", "namespace": "build", "chart": "jenkins-5.0.0", "values": {}}
+        rc, audit, _ = run_checker(tmp_path, [release], "1.33", "1.34")
+        assert rc == 0 and "경로 없음" in audit
+
+    def test_kiali_operator_has_own_compatibility_entry(self, tmp_path):
+        release = {"name": "mesh", "namespace": "mesh", "chart": "kiali-operator-2.26.0"}
+        rc, audit, _ = run_checker(tmp_path, [release], "1.33", "1.34")
+        assert rc == 2 and "HELM-SUPPORT" in audit
+        assert "registry 미등록" not in audit
+
+
+class TestOfflineReleaseCompatibility:
+    @pytest.mark.parametrize("without_cli", [False, True])
+    @pytest.mark.parametrize("chart, app, expected", [
+        ("custom-1.0.0", "1.0.0", 0),
+        ("ingress-nginx-4.13.5", "1.13.5", 1),
+        ("ingress-nginx-4.14.2", "1.14.2", 2)])
+    def test_releases_only_preserves_original_exit_without_kubectl(
+            self, tmp_path, monkeypatch, without_cli, chart, app, expected):
+        if without_cli:
+            monkeypatch.setenv("PATH", str(tmp_path))
+        else:
+            for cli in ("kubectl", "helm"):
+                spy = tmp_path / cli
+                spy.write_text("#!/bin/sh\necho called > '" + str(tmp_path / "called") + "'\nexit 1\n")
+                spy.chmod(0o755)
+            monkeypatch.setenv("PATH", str(tmp_path))
+        release = {"name": "app", "namespace": "apps", "chart": chart, "app_version": app}
+        rc, audit, out = run_checker(tmp_path, [release], "1.33", "1.34")
+        assert rc == expected
+        assert "health 미검사(pods 미주입)" in audit and "INFO" in out
+        assert not (tmp_path / "called").exists()
+
+    def test_missing_values_injection_remains_unknown_warn(self, tmp_path):
+        release = {"name": "ci", "namespace": "build", "chart": "jenkins-5.0.0"}
+        rc, audit, _ = run_checker(tmp_path, [release], "1.33", "1.34")
+        assert rc == 2 and "설치 values를 수집하지 못함" in audit
+
+
+@pytest.mark.parametrize("extra", [["--unexpected"], ["--releases-json", "{"],
+                                   ["--releases-json", "{}"]])
+def test_invalid_cli_and_release_json_exit_64(tmp_path, extra):
+    proc = subprocess.run([
+        sys.executable, str(CHECKER), "--current", "1.33", "--target", "1.34",
+        "--registry-dir", str(REGISTRY), "--audit-log", str(tmp_path / "audit.log"),
+        "--releases-json", "[]", *extra], capture_output=True, text=True)
+    assert proc.returncode == 64
+    assert proc.stdout.splitlines()[-1].startswith("NEXT:")
+    assert "Traceback" not in proc.stderr

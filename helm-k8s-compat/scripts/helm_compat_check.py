@@ -19,9 +19,9 @@ Usage:
 
 Exit codes (기존 gate_check.py와 동일 신뢰 모델):
   0 = PASS (호환성 문제 없음)
-  1 = FAIL (CRITICAL — 업그레이드 차단, 차트 먼저 조치)
+  1 = FAIL (CRITICAL 또는 저장 오류 — 중단)
   2 = WARN (HIGH — 수동 검토 필요)
-  64 = 입력 오류 (잘못된 버전 문자열 등 — 게이트 판정 아님)
+  64 = 입력/사용법 오류 (gate verdict 아님)
   127 = helm CLI 미존재
 """
 
@@ -29,7 +29,10 @@ import argparse
 import json
 import subprocess
 import sys
+from pathlib import Path
 from datetime import datetime, timezone
+
+import health_inputs
 
 try:
     import compat_lib
@@ -38,7 +41,6 @@ except ImportError:
     sys.exit(1)
 
 # 입력(사용법) 오류 — WARN(2)과 반드시 구분되어야 한다.
-# 2를 쓰면 "수동 검토 후 진행"으로 오해되어 게이트가 무력화된다. sysexits.h의 EX_USAGE.
 EXIT_USAGE = 64
 
 RED = "\033[0;31m"
@@ -75,6 +77,10 @@ def fetch_releases_from_helm(timeout: int = 60):
 def evaluate_release(entry: dict, release: dict, current: str, target: str,
                      today: str) -> list:
     """registry entry와 설치 release를 대조하여 Finding 리스트를 반환한다."""
+    if "support" not in entry:
+        return [compat_lib.Finding(
+            "HELM-UNKNOWN", "FAIL", "MEDIUM",
+            f"{release['namespace']}/{release['name']}: unknown — registry는 risky_values 전용; K8s 호환성 근거 없음, 수동 검토 필요")]
     chart_ref = release.get("chart", "")
     _, chart_ver = compat_lib.parse_chart_ref(chart_ref)
     # chart 버전으로 폴백하지 않는다 — chart와 app이 별개 체계인 차트에서
@@ -181,8 +187,16 @@ def write_audit(path: str, cluster_header: str, agg: Aggregator) -> None:
 # ══════════════════════════════════════════════════════════════
 # main
 # ══════════════════════════════════════════════════════════════
-def main() -> int:
-    p = argparse.ArgumentParser(description="Helm 차트 ↔ K8s 버전 호환성 검증")
+class GateParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        print(f"ERROR: {message}", file=sys.stderr)
+        print("NEXT: STOP — CLI 인자를 수정한 뒤 재실행.")
+        self.exit(EXIT_USAGE)
+
+
+def parse_arguments():
+    p = GateParser(description="Helm 차트 ↔ K8s 버전 호환성 검증")
     p.add_argument("--current", required=True, help="현재 K8s 버전 (예: 1.33)")
     p.add_argument("--target", required=True, help="대상 K8s 버전 (예: 1.34)")
     p.add_argument("--registry-dir", required=True, help="registry JSON 디렉토리")
@@ -190,6 +204,9 @@ def main() -> int:
     p.add_argument("--today", default=None, help="오늘 날짜 YYYY-MM-DD (per_release EOL 비교용, 기본=실제 오늘)")
     p.add_argument("--releases-json", default=None,
                    help="helm ls 대신 주입할 release JSON 배열 (테스트/드라이런)")
+    p.add_argument("--pods-json", help="kubectl 대신 주입할 Kubernetes PodList JSON")
+    p.add_argument("--health-out", help="release별 비정상 Pod snapshot 저장 경로")
+    p.add_argument("--health-baseline", help="이전 --health-out 파일 경로")
     args = p.parse_args()
 
     # 입력 검증 (시스템 경계 fail-fast) — 잘못된 버전은 traceback 대신 명확한 에러
@@ -205,8 +222,10 @@ def main() -> int:
               f"낮습니다 — 다운그레이드는 지원하지 않습니다{NC}", file=sys.stderr)
         return EXIT_USAGE
 
-    today = args.today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return args
 
+
+def collect_inputs(args):
     # Release 수집
     if args.releases_json is not None:
         try:
@@ -220,24 +239,50 @@ def main() -> int:
             print(f"{RED}ERROR: helm ls 실행 불가 — helm CLI 설치/인증 확인{NC}", file=sys.stderr)
             return 127
 
-    registry = compat_lib.load_registry(args.registry_dir)
+    try:
+        health_inputs.validate_releases(releases)
+        pods = (health_inputs.validate_pods(json.loads(args.pods_json))
+                if args.pods_json is not None else None)
+        baseline = (health_inputs.validate_baseline(json.loads(
+            Path(args.health_baseline).read_text(encoding="utf-8")))
+                    if args.health_baseline else None)
+        registry = compat_lib.load_registry(args.registry_dir)
+    except (ValueError, OSError) as exc:
+        print(f"ERROR: 입력 검증 실패: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    return releases, pods, baseline, registry
 
-    audit_mode = args.current == args.target
-    headline = (f"현재 상태 점검: K8s {args.current}" if audit_mode
-                else f"업그레이드 사전 점검: K8s {args.current} → {args.target}")
-    print("════════════════════════════════════════════════════════════")
-    print(f"  Helm 호환성 {headline}")
-    print(f"  설치 Release: {len(releases)}개 | registry 차트: {len(registry)}개")
-    print("════════════════════════════════════════════════════════════")
 
+def inspect_values(entry, rel, args, key, agg):
+    reason = None
+    values = rel.get("values")
+    if args.releases_json is None:
+        values, reason = health_inputs.command_json([
+            "helm", "get", "values", rel["name"], "-n", rel["namespace"], "--all", "-o", "json"])
+        if reason:
+            agg.add(compat_lib.Finding("HELM-VALUES", "FAIL", "HIGH",
+                                      f"{key}: unknown — {reason}"))
+    if not reason:
+        for finding in compat_lib.risky_values_findings(entry, values, key):
+            agg.add(finding)
+
+
+def inspect_releases(args, releases, pods, baseline, registry, today):
     agg = Aggregator()
-
+    health = {"schema_version": 1, "releases": {}}
     for rel in releases:
         chart_ref = rel.get("chart", "")
         chart_name, _ = compat_lib.parse_chart_ref(chart_ref)
         ns = rel.get("namespace", "?")
 
+        key = rel["namespace"] + "/" + rel["name"]
+        observation = health_inputs.observe_health(rel, pods, live=args.releases_json is None)
+        health["releases"][key] = observation
+        for finding in compat_lib.health_findings(key, observation, baseline):
+            agg.add(finding)
         entry = registry.get(chart_name)
+        if entry and entry.get("risky_values"):
+            inspect_values(entry, rel, args, key, agg)
         if entry is None:
             # registry 미등록 — 자동 평가 불가, 수동 검토 INFO (gate 차단 안 함)
             agg.add(compat_lib.Finding(
@@ -259,9 +304,20 @@ def main() -> int:
         for f in findings:
             agg.add(f)
 
+    return agg, health
+
+
+def finish_check(args, agg, health, audit_mode):
     header = (f"# Audit: current K8s {args.current} (상태 점검)" if audit_mode
               else f"# Upgrade: {args.current} → {args.target}")
-    write_audit(args.audit_log, header, agg)
+    try:
+        if args.health_out:
+            Path(args.health_out).write_text(json.dumps(health, ensure_ascii=False, indent=2) + "\n",
+                                             encoding="utf-8")
+        write_audit(args.audit_log, header, agg)
+    except OSError as exc:
+        print(f"ERROR: 결과 저장 실패: {exc}", file=sys.stderr)
+        return 1
 
     code = agg.exit_code()
     print()
@@ -278,5 +334,29 @@ def main() -> int:
     return code
 
 
+
+def main() -> int:
+    args = parse_arguments()
+    if isinstance(args, int):
+        return args
+    inputs = collect_inputs(args)
+    if isinstance(inputs, int):
+        return inputs
+    releases, pods, baseline, registry = inputs
+    today = args.today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    audit_mode = args.current == args.target
+    headline = (f"현재 상태 점검: K8s {args.current}" if audit_mode
+                else f"업그레이드 사전 점검: K8s {args.current} → {args.target}")
+    print("════════════════════════════════════════════════════════════")
+    print(f"  Helm 호환성 {headline}")
+    print(f"  설치 Release: {len(releases)}개 | registry 차트: {len(registry)}개")
+    print("════════════════════════════════════════════════════════════")
+    agg, health = inspect_releases(args, releases, pods, baseline, registry, today)
+    return finish_check(args, agg, health, audit_mode)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    if code:
+        print("NEXT: STOP — 입력/조회 오류를 해결하거나 보고된 finding을 검토한 뒤 재실행.")
+    sys.exit(code)

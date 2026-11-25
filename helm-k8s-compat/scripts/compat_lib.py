@@ -535,6 +535,15 @@ def load_registry(registry_dir: str) -> dict:
             print(f"WARNING: registry 파일 로드 실패, 스킵함: {f.name} ({e})",
                   file=sys.stderr)
             continue
+        rules = data.get("risky_values", [])
+        if not isinstance(rules, list):
+            raise ValueError(f"{f.name}: risky_values는 배열이어야 함")
+        for rule in rules:
+            if (not isinstance(rule, dict) or "value" not in rule or
+                    not isinstance(rule.get("path"), str) or
+                    not all(rule["path"].split(".")) or
+                    not isinstance(rule.get("reason"), str) or not rule["reason"]):
+                raise ValueError(f"{f.name}: risky_values path/value/reason 형식 오류")
         name = data.get("chart_name")
         if not name:
             print(f"WARNING: registry 파일에 chart_name 없음, 스킵함: {f.name}",
@@ -547,3 +556,71 @@ def load_registry(registry_dir: str) -> dict:
             # 메시지에 ['base', 'istiod', ...] 리스트가 통째로 찍힌다.
             reg[n] = {**data, "chart_name": n}
     return reg
+
+
+# Release health snapshots contain no values (which may contain secrets).
+def unhealthy_pods(pods: list, release: dict) -> list:
+    """Select namespace/instance pods; detect phase and container READY anomalies."""
+    unhealthy = []
+    for pod in pods:
+        meta = pod["metadata"]
+        if (meta["namespace"] != release["namespace"] or
+                meta.get("labels", {}).get("app.kubernetes.io/instance") != release["name"]):
+            continue
+        status = pod.get("status", {})
+        phase = status.get("phase", "unknown")
+        containers = pod["spec"]["containers"]
+        statuses = {c["name"]: c for c in status.get("containerStatuses", [])}
+        ready = sum(statuses.get(c["name"], {}).get("ready") is True for c in containers)
+        total = len(containers)
+        if phase not in ("Running", "Succeeded") or ready != total:
+            unhealthy.append({"name": meta["name"], "phase": phase,
+                              "ready": f"{ready}/{total}"})
+    return sorted(unhealthy, key=lambda pod: pod["name"])
+
+
+def health_findings(key: str, health: dict, baseline: Optional[dict]) -> list:
+    """Only an identical observed anomaly can be downgraded by a baseline."""
+    if health["unknown"]:
+        return [Finding("HELM-HEALTH", "FAIL", "HIGH",
+                        f"{key}: unknown — {health['unknown']}")]
+    if health.get("info"):
+        return [Finding("HELM-HEALTH", "FAIL", "MEDIUM", f"{key}: {health['info']}")]
+    prior_health = (baseline or {}).get("releases", {}).get(key, {})
+    previous = prior_health.get("unhealthy", []) if prior_health.get("unknown") is None else []
+    findings = []
+    for pod in health["unhealthy"]:
+        existing = baseline is not None and pod in previous
+        label = "기존 장애" if existing else ("신규 장애" if baseline is not None
+                                             else "기존/신규 unknown — baseline 없음")
+        findings.append(Finding(
+            "HELM-HEALTH", "FAIL", "MEDIUM" if existing else "HIGH",
+            f"{key}/{pod['name']}: {pod['phase']} READY {pod['ready']} — {label}"))
+    return findings
+
+
+def risky_values_findings(entry: dict, values, key: str) -> list:
+    """Match only registered paths, with JSON type-sensitive equality."""
+    rules = entry.get("risky_values", [])
+    if not rules:
+        return []
+    if not isinstance(values, dict):
+        return [Finding("HELM-VALUES", "FAIL", "HIGH",
+                        f"{key}: unknown — 설치 values를 수집하지 못함")]
+    findings = []
+    missing = object()
+    for rule in rules:
+        value = values
+        for part in rule["path"].split("."):
+            value = value.get(part, missing) if isinstance(value, dict) else missing
+        if value is missing:
+            findings.append(Finding(
+                "HELM-VALUES", "FAIL", "MEDIUM",
+                f"{key}: {rule['path']} 경로 없음 (계산된 values)"))
+        elif json.dumps(value, sort_keys=True) == json.dumps(rule["value"], sort_keys=True):
+            findings.append(Finding("HELM-VALUES", "FAIL", "HIGH",
+                                    f"{key}: {rule['path']} — {rule['reason']}"))
+        else:
+            findings.append(Finding("HELM-VALUES", "PASS", "LOW",
+                                    f"{key}: {rule['path']} 위험 규칙 불일치"))
+    return findings
