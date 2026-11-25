@@ -185,7 +185,7 @@ def test_full_unknown_node_class_after_cannot_skip_monitor_or_control_plane(tmp_
         "before": {"yaml_body": "kind: EC2NodeClass\nspec: {}\n"},
         "after": {"yaml_body": None}, "after_unknown": {"yaml_body": True}}}
     code, _, node_changes = classify_plan({"resource_changes": [change]}, "full", "1.35", {})
-    assert code == 2 and node_changes is True
+    assert code == 1 and node_changes is True
     # Test the guard independently using a synthetic PLAN-CHECK PASS.
     saved, audit, fields, args = setup(tmp_path, "full", node_changes=node_changes)
     with pytest.raises(ValueError, match="rule 4"):

@@ -207,7 +207,7 @@ def test_full_unknown_node_class_after_still_requires_node_protections(manifest_
     change = resource(kind, {manifest_field: body}, {manifest_field: None},
                       unknown={manifest_field: True})
     code, _, node_changes = plan_check.classify_plan(plan(change), "full", "1.35", {})
-    assert code == 2 and node_changes is True
+    assert code == 1 and node_changes is True
 
 
 def test_full_unknown_manifest_identity_fails_closed():
@@ -268,7 +268,7 @@ def test_conflicting_named_ami_expectations_are_usage_error(tmp_path, capsys):
 
 @pytest.mark.parametrize("kind", ["aws_eks_node_group", "kubernetes_manifest"])
 @pytest.mark.parametrize("unknown", [False, True])
-def test_full_ami_change_without_kind_expectation_asks_user(tmp_path, monkeypatch, capsys, kind, unknown):
+def test_full_ami_change_without_kind_expectation_stops(tmp_path, monkeypatch, capsys, kind, unknown):
     if kind == "aws_eks_node_group":
         change = resource(kind, {"release_version": "old"}, {"release_version": "new"},
                           unknown={"release_version": unknown})
@@ -277,8 +277,8 @@ def test_full_ami_change_without_kind_expectation_asks_user(tmp_path, monkeypatc
         after = {"kind": "EC2NodeClass", "spec": {"amiSelectorTerms": [{"alias": "new"}]}}
         change = resource(kind, {"manifest": before}, {"manifest": after},
                           unknown={"manifest": unknown})
-    assert invoke(tmp_path, monkeypatch, plan(change), "full")[0] == 2
-    assert capsys.readouterr().out.splitlines()[-1].startswith("NEXT: ASK_USER ")
+    assert invoke(tmp_path, monkeypatch, plan(change), "full")[0] == 1
+    assert capsys.readouterr().out.splitlines()[-1].startswith("NEXT: STOP ")
 
 
 def test_full_unchanged_ami_without_expectation_is_allowed():
@@ -292,3 +292,62 @@ def test_ami_expectations_for_other_kind_do_not_authorize_karpenter():
         "kind": "EC2NodeClass", "spec": {"amiSelectorTerms": [{"alias": "a"}]}}})
     assert plan_check.classify_plan(plan(change), "karpenter", "1.35",
                                     {"release_version": {"a"}})[0] == 1
+
+
+@pytest.mark.parametrize("field,before,after,unknown", [
+    ("tags", {"owner": "external"}, {}, {}),
+    ("tags", {}, {"owner": "new"}, {}),
+    ("tags_all", {"owner": "old"}, {"owner": "new"}, {}),
+    ("tags", {}, {}, {"tags": True}),
+    ("tags_all", {}, {}, {"tags_all": {"owner": True}}),
+])
+def test_full_tag_drift_asks_user(tmp_path, monkeypatch, capsys, field, before, after, unknown):
+    change = resource("aws_security_group", {field: before}, {field: after}, unknown=unknown)
+    assert invoke(tmp_path, monkeypatch, plan(change), "full")[0] == 2
+    out = capsys.readouterr().out
+    assert "outside full allow-list: " + change["address"] in out
+    assert "tag drift" in out and out.splitlines()[-1].startswith("NEXT: ASK_USER ")
+
+
+@pytest.mark.parametrize("step", plan_check.STEPS)
+@pytest.mark.parametrize("kind", ["aws_eks_node_group", "kubernetes_manifest", "kubectl_manifest"])
+@pytest.mark.parametrize("actual", ["new", "wrong", None])
+def test_node_comparison_table_precedes_result(tmp_path, monkeypatch, capsys, step, kind, actual):
+    if kind == "aws_eks_node_group":
+        change = resource(kind, {"version": "1.34", "release_version": "old"},
+                          {"version": "1.35", "release_version": actual},
+                          unknown={"release_version": actual is None})
+        expected = {"release_version": ["new"]}
+        transition = "version: 1.34 → 1.35; release_version: old → " + (actual or "unknown")
+    else:
+        field = "manifest" if kind == "kubernetes_manifest" else "yaml_body"
+        def body(value):
+            data = {"kind": "EC2NodeClass", "spec": {"amiSelectorTerms": [{"alias": value}]}}
+            return data if field == "manifest" else json.dumps(data)
+        change = resource(kind, {field: body("old")}, {field: body(actual)},
+                          unknown={field: actual is None})
+        expected = {"alias": ["new"]}
+        transition = "alias: old → " + (actual or "unknown")
+    invoke(tmp_path, monkeypatch, plan(change), step, expected=expected)
+    out = capsys.readouterr().out
+    row = change["address"] + " | new | " + transition + " | " + ("yes" if actual == "new" else "no")
+    assert "address | expected | before → after | match" in out
+    assert row in out and out.index(row) < out.index("PLAN-CHECK ")
+
+
+def test_node_table_without_expectation_shows_none(tmp_path, monkeypatch, capsys):
+    change = resource("aws_eks_node_group", {"release_version": "old"}, {"release_version": "new"})
+    invoke(tmp_path, monkeypatch, plan(change), "full")
+    assert change["address"] + " | none | release_version: old → new | no" in capsys.readouterr().out
+
+
+def test_full_matching_expectation_without_tag_drift_passes(tmp_path, monkeypatch, capsys):
+    change = resource("aws_eks_node_group", {"release_version": "old", "tags": {"owner": "same"}},
+                      {"release_version": "new", "tags": {"owner": "same"}})
+    assert invoke(tmp_path, monkeypatch, plan(change), "full", expected={"release_version": ["new"]})[0] == 0
+    assert "release_version: old → new | yes" in capsys.readouterr().out
+
+
+def test_no_node_changes_prints_no_comparison_table(tmp_path, monkeypatch, capsys):
+    invoke(tmp_path, monkeypatch, plan(cluster()))
+    assert "address | expected" not in capsys.readouterr().out

@@ -5,8 +5,10 @@ Fixed step policy: cp=cluster version, addon updates, time_sleep replacement,
 node-group version-only updates alongside a CP version update or to the target; addon=addon
 updates; nodes=node-group version/release_version updates; karpenter=EC2NodeClass
 manifest updates. full permits non-destructive reconciliation; only time_sleep
-may be replaced; full also permits deleting deposed objects. Unlisted changes require ASK_USER (exit 2), while
-version/AMI mismatch and unreadable input are STOP (exit 1).
+may be replaced; full also permits deleting deposed objects. Full updates with
+tag drift and unlisted changes require ASK_USER (exit 2), while version/AMI
+mismatch, changed/unknown full AMIs without expectations and unreadable input
+are STOP (exit 1).
 
 AMI expectations name Terraform variables. ``release_version=value`` and
 ``alias=value`` additionally name resolved resource values when these differ
@@ -122,7 +124,7 @@ def _allowed(resource, step, cp_update, target_version):
         return (kind == "time_sleep" and step in ("cp", "full")
                 and "create" in actions)
     if step == "full":
-        return True
+        return actions != ["update"] or not (_changed_fields(change, kind) & {"tags", "tags_all"})
     if kind == "aws_eks_addon":
         return step in ("cp", "addon") and actions == ["update"]
     if step == "cp" and kind == "time_sleep":
@@ -186,7 +188,11 @@ def classify_plan(plan, step, target_version, expected):
         return ami_code, ami_message, node_changes
     unexpected = [r.get("address", r["type"]) for r in changing if not _allowed(r, step, cp_update, target_version)]
     if unexpected:
-        return 2, "outside {} allow-list: {}".format(step, ", ".join(unexpected)), node_changes
+        return 2, "outside {} allow-list: {}".format(step, ", ".join(unexpected)) + (
+            " (tag drift)" if step == "full" and any(
+                r["change"]["actions"] == ["update"] and
+                _changed_fields(r["change"], r["type"]) & {"tags", "tags_all"}
+                for r in changing) else ""), node_changes
     return 0, "saved plan matches step allow-list", node_changes
 
 
@@ -214,11 +220,41 @@ def _check_amis(resources, step, expected):
         allowed = _expected_values(expected, kind)
         ami_changed = values != _ami_values(change, "before") or None in values
         if step == "full" and ami_changed and not allowed:
-            return 2, "changed/unknown node AMI requires approved plan expectations for " + kind
+            return 1, "changed/unknown node AMI requires approved plan expectations for " + kind
         if step == "nodes" or expected:
             if not values or any(not value or value not in allowed for value in values):
                 return 1, "node AMI missing/unknown or differs from approved plan expectations"
     return 0, ""
+
+
+def _print_node_table(resources, expected):
+    """Show approved AMIs beside resolved plan values without changing gate policy."""
+    rows = []
+    for resource in resources:
+        change = resource["change"]
+        if change["actions"] in (["no-op"], ["read"]):
+            continue
+        is_mng = resource["type"] == "aws_eks_node_group"
+        if not is_mng and not _is_node_class(change):
+            continue
+        kind = "release_version" if is_mng else "alias"
+        allowed = _expected_values(expected, kind)
+        values = _ami_values(change)
+        matched = bool(values) and all(value and value in allowed for value in values)
+        before, after = change.get("before") or {}, change.get("after") or {}
+        unknown = change.get("after_unknown") or {}
+        transitions = []
+        if is_mng and any("version" in side for side in (before, after, unknown)):
+            version = None if _has_unknown(unknown.get("version")) else after.get("version")
+            transitions.append("version: {} → {}".format(before.get("version") or "unknown", version or "unknown"))
+        transitions.append("{}: {} → {}".format(kind,
+            ", ".join(str(value) if value else "unknown" for value in _ami_values(change, "before")) or "unknown",
+            ", ".join(str(value) if value else "unknown" for value in values) or "unknown"))
+        rows.append("{} | {} | {} | {}".format(resource.get("address", resource["type"]),
+            ", ".join(sorted(allowed)) or "none", "; ".join(transitions), "yes" if matched else "no"))
+    if rows:
+        print("address | expected | before → after | match")
+        print("\n".join(rows))
 
 
 def build_parser():
@@ -264,7 +300,9 @@ def main(argv=None):
             raise ValueError("terraform show failed: " + result.stderr.strip())
         plan = json.loads(result.stdout)
         code, message, node_changes = classify_plan(plan, step["type"], doc["target_version"], expected)
-        metadata["cp_update"] = str(_cp_update(_validate_changes(plan))).lower()
+        resources = _validate_changes(plan)
+        _print_node_table(resources, expected)
+        metadata["cp_update"] = str(_cp_update(resources)).lower()
         metadata["node_changes"] = str(node_changes).lower()
         if load(args.plan_doc)[2] != binding["plan_sha256"]:
             raise ValueError("approved JSON changed while being checked")

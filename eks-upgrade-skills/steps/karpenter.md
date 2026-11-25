@@ -70,6 +70,8 @@ python3 scripts/plan_check.py --planfile "${TF_DIR}/karpenter.tfplan" --plan-doc
   --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log
 ```
 
+Show the plan_check node comparison table to the user before apply.
+
 Call 1: run apply_guard in a separate foreground Bash call, only after the preceding command exits 0.
 
 ```bash
