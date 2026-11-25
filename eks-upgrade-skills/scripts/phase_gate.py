@@ -1136,6 +1136,8 @@ def main() -> None:
     # ── phase3: Add-on Safety 검증 ──
     p3 = subparsers.add_parser("phase3", help="Phase 3: Add-on Safety 검증")
     p3.add_argument("--cluster-name", required=True)
+    # 다른 phase와 같은 명령 형태를 허용한다. Add-on 검증은 버전과 무관해 값은 쓰지 않는다.
+    p3.add_argument("--target-version", default=None)
     p3.add_argument("--audit-log", default="audit.log")
 
     # ── phase4: Data Plane 검증 ──
