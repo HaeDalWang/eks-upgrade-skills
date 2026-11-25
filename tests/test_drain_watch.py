@@ -6,6 +6,8 @@ tests/test_drain_watch.py — drain_watch.py 단위 테스트
 상태성 신호(PDB/NodeClaim)는 해소되면 재발 시 다시 기록한다.
 """
 
+import pytest
+
 import drain_watch
 
 
@@ -401,3 +403,9 @@ class TestPdbFailAfterCli:
             with pytest.raises(SystemExit) as exc:
                 drain_watch.main()
             assert exc.value.code == 2
+
+
+@pytest.fixture(autouse=True)
+def empty_new_monitor_resources(monkeypatch):
+    # PDB/event tests inject their own polls; no STS/Pod/node exists in those scenarios.
+    monkeypatch.setattr(drain_watch, "_kubectl_get", lambda *args, **kwargs: {"items": []})

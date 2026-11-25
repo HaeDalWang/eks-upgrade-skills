@@ -22,7 +22,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from lib import SYSTEM_NS, GateArgumentParser, audit_append, kubectl_json, run_cmd
+from lib import SYSTEM_NS, GateArgumentParser, audit_append, kubectl_json, run_cmd, redact_plan_output
 from plan_check import _ami_values, _manifest, _manifest_kind
 from upgrade_plan import detail_fields
 
@@ -664,7 +664,9 @@ def discover(args, doc):
     tf_dir = resolve_tf_dir(args)
     doc["tf_dir"] = str(tf_dir)
     plan = trial_plan(tf_dir, prefix, args.tf_var_file)
-    found = analyze_terraform(args, doc, plan, tf_dir)
+    safe = redact_plan_output(plan)
+    # Mask the source paths before deriving facts and diagnostic strings.
+    found = analyze_terraform(args, doc, safe, tf_dir)
     doc["cluster_name"] = args.cluster_name or cluster_name_from(found, doc["module"]["address"])
     if not doc["cluster_name"]:
         raise Halt("ask_user", "cluster_name", "aws_eks_cluster name is not in Terraform state; "

@@ -3329,3 +3329,9 @@ class TestRolloutRetry:
         assert phase_gate.gate_phase7("demo", "1.35", str(audit)) == 2
         assert capsys.readouterr().out.splitlines()[-1].startswith("NEXT: RETRY wait 30s")
         assert audit.read_text().count("current apply") == 1
+
+
+@pytest.fixture(autouse=True)
+def empty_statefulsets_for_existing_scenarios(monkeypatch):
+    # Existing scenarios have no StatefulSets; the new rollout query must stay offline.
+    monkeypatch.setattr(phase_gate, "kubectl_json", lambda *args, **kwargs: {"items": []})

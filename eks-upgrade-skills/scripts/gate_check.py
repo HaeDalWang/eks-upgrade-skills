@@ -36,7 +36,7 @@ from typing import Optional
 try:
     from lib import (
         run_cmd, kubectl_json, _parse_cpu, _parse_mem,
-        GateArgumentParser, audit_init, audit_write, audit_flush, record, GateResult,
+        diagnostic_targets, GateArgumentParser, audit_init, audit_write, audit_flush, record, GateResult,
         RED, YELLOW, GREEN, CYAN, NC,
         SYSTEM_NS, DATA_PLANE_RESOURCES, ADDON_BAD_STATES,
         _gate, reset_gate,
@@ -496,7 +496,7 @@ def check_wls003() -> None:
             az_count[az] += 1
 
     # PV별 위험 판정
-    risks = 0
+    risks = []
     for pv in pvs.get("items", []):
         if pv.get("status", {}).get("phase") != "Bound":
             continue
@@ -517,11 +517,11 @@ def check_wls003() -> None:
                                 f"(노드 {az_count.get(az, 0)}개)",
                                 file=sys.stderr,
                             )
-                            risks += 1
+                            risks.append(f"{ns}/{name}@{az}")
 
-    if risks > 0:
+    if risks:
         record("WLS-003", "CRITICAL", "FAIL",
-               f"PV AZ 위험 {risks}개 (drain 시 재스케줄 불가) → 해당 AZ에 노드 추가 또는 PV 마이그레이션 필요")
+               f"PV AZ 위험 {len(risks)}개: {diagnostic_targets(risks)} (drain 시 재스케줄 불가) → 해당 AZ에 노드 추가 또는 PV 마이그레이션 필요")
     else:
         record("WLS-003", "CRITICAL", "PASS", "PV AZ 위험 없음")
 
@@ -622,11 +622,12 @@ def check_wls006() -> None:
                 continue
             name = item["metadata"]["name"]
             spec = item.get("spec", {}).get("template", {}).get("spec", {})
+            workload_kind = "Deployment" if kind == "deployments" else "StatefulSet"
 
             # TSC: whenUnsatisfiable == DoNotSchedule
             for tsc in spec.get("topologySpreadConstraints", []):
                 if tsc.get("whenUnsatisfiable") == "DoNotSchedule":
-                    risky.append(f"{ns}/{name}")
+                    risky.append(f"{ns}/{workload_kind}/{name}")
                     break
             else:
                 # Affinity: requiredDuringSchedulingIgnoredDuringExecution
@@ -636,7 +637,7 @@ def check_wls006() -> None:
                 pod_anti = (affinity.get("podAntiAffinity", {})
                             .get("requiredDuringSchedulingIgnoredDuringExecution"))
                 if node_aff or pod_anti:
-                    risky.append(f"{ns}/{name}")
+                    risky.append(f"{ns}/{workload_kind}/{name}")
 
     if not risky:
         record("WLS-006", "HIGH", "PASS",
@@ -659,11 +660,11 @@ def check_wls006() -> None:
 
     if single_az:
         record("WLS-006", "HIGH", "FAIL",
-               f"위험 워크로드 {len(risky)}개 + 단일 노드 AZ: "
+               f"위험 워크로드 {len(risky)}개: {diagnostic_targets(risky)} + 단일 노드 AZ: "
                f"{', '.join(single_az)} → 해당 AZ에 노드 추가 또는 whenUnsatisfiable을 ScheduleAnyway로 변경")
     else:
         record("WLS-006", "HIGH", "FAIL",
-               f"엄격한 토폴로지 제약 워크로드 {len(risky)}개 (drain 시 Pending 위험) → 노드 수 확보 또는 preferred affinity로 변경 권장")
+               f"엄격한 토폴로지 제약 워크로드 {len(risky)}개: {diagnostic_targets(risky)} (drain 시 Pending 위험) → 노드 수 확보 또는 preferred affinity로 변경 권장")
 
 
 # ══════════════════════════════════════════════════════════════
