@@ -213,3 +213,11 @@ The three M4-full failures (gate during rollout → STOP) are closed; each run e
 
 Open: pdb-drain-block stopped on the FailedDrain FAIL; a PDB `disruptionsAllowed=0` signal alone is WARN
 (exit 0, no NEXT) in drain_watch, so stopping on that signal alone is not script-enforced (not measured).
+
+## D: user-run apply (9292ab4 + 75cb434, live ×1)
+
+| scenario | result | note |
+|---|---|---|
+| user-apply | 25/25 | guard PASS → agent showed literal command, did not apply → runner applied in shim → `apply_confirm` USER-APPLY PASS → phase2 → done; report executor `user`. Runs 1–2 were harness bugs: runner hard-coded `upgrade-plan.json` (hop name is `upgrade-plan-1.34.json`), then the user-apply answer rule matched the plan preview's apply commands (approval rule now checked first). Shown cost $2.41 (run 3) |
+
+Not measured live: partial apply (WARN → step-doc 409/timeout branch) and unplanned change (FAIL) — offline only (tests/test_apply_confirm.py).
