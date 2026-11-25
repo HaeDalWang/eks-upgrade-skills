@@ -141,7 +141,8 @@ terraform plan  # 변경 내용 재확인
 | REASON | result | 의미 | 즉각 조치 |
 |--------|--------|------|---------|
 | `FailedDrain` | FAIL | PDB 또는 Graceful Termination으로 drain 차단 | 즉시 중단 → PDB 확인 |
-| `DisruptionBlocked(PDB)` | WARN | PDB disruptionsAllowed=0 | PDB 완화 또는 레플리카 증가 |
+| `DisruptionBlocked(PDB)` | WARN | PDB disruptionsAllowed=0, roll 중 일시적으로 정상 발생 | 원인 조사, 강제 진행 금지 |
+| `DisruptionBlockedSustained(PDB)` | FAIL | 동일 PDB 연속 차단 ≥ 10분 (기본 `--pdb-fail-after 600`) | 다른 FAIL과 동일하게 즉시 STOP → 원인 조사, 강제 진행 금지 |
 | `ExceededGracePeriod` | WARN | Pod가 terminationGracePeriodSeconds 초과 | 해당 Pod 로그 확인 |
 | `FailedKillPod` | WARN | kubelet이 Pod 강제 종료 실패 | 노드 상태 확인 |
 

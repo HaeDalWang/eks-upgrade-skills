@@ -123,40 +123,40 @@ class TestExtractBlockedPdbs:
 
     def test_blocked_pdb_detected(self):
         pdbs = {"items": [self._pdb("api", allowed=0)]}
-        new, seen = drain_watch.extract_blocked_pdbs(pdbs, set())
+        new, seen = drain_watch.extract_blocked_pdbs(pdbs, {}, 0, 600)
         assert len(new) == 1
         assert new[0]["name"] == "api"
         assert "prod/api" in seen
 
     def test_healthy_pdb_ignored(self):
         pdbs = {"items": [self._pdb("api", allowed=1)]}
-        new, _ = drain_watch.extract_blocked_pdbs(pdbs, set())
+        new, _ = drain_watch.extract_blocked_pdbs(pdbs, {}, 0, 600)
         assert new == []
 
     def test_pdb_with_zero_expected_pods_ignored(self):
         # expectedPods=0 → 워크로드 없음, 차단 의미 없음
         pdbs = {"items": [self._pdb("api", allowed=0, expected=0)]}
-        new, _ = drain_watch.extract_blocked_pdbs(pdbs, set())
+        new, _ = drain_watch.extract_blocked_pdbs(pdbs, {}, 0, 600)
         assert new == []
 
     def test_already_recorded_pdb_not_re_emitted(self):
         pdbs = {"items": [self._pdb("api", allowed=0)]}
-        _, seen = drain_watch.extract_blocked_pdbs(pdbs, set())
-        new2, _ = drain_watch.extract_blocked_pdbs(pdbs, seen)
+        _, seen = drain_watch.extract_blocked_pdbs(pdbs, {}, 0, 600)
+        new2, _ = drain_watch.extract_blocked_pdbs(pdbs, seen, 30, 600)
         assert new2 == []
 
     def test_resolved_pdb_dropped_from_seen_so_recurrence_re_emits(self):
         # Arrange — blocked, recorded
         blocked = {"items": [self._pdb("api", allowed=0)]}
-        _, seen = drain_watch.extract_blocked_pdbs(blocked, set())
+        _, seen = drain_watch.extract_blocked_pdbs(blocked, {}, 0, 600)
 
         # Act 1 — resolved (allowed=1): seen에서 빠져야 함
         healthy = {"items": [self._pdb("api", allowed=1)]}
-        _, seen2 = drain_watch.extract_blocked_pdbs(healthy, seen)
+        _, seen2 = drain_watch.extract_blocked_pdbs(healthy, seen, 30, 600)
         assert "prod/api" not in seen2
 
         # Act 2 — blocked again → 재기록되어야 함
-        new3, _ = drain_watch.extract_blocked_pdbs(blocked, seen2)
+        new3, _ = drain_watch.extract_blocked_pdbs(blocked, seen2, 30, 600)
         assert len(new3) == 1
 
 
@@ -290,3 +290,114 @@ class TestWatchLoop:
         content = audit_log.read_text(encoding="utf-8")
         assert "DisruptionBlocked(PDB)" in content
         assert "prod/api" in content
+
+
+class TestPdbEpisodes:
+    def _run(self, tmp_path, samples, fail_after=600):
+        """시각과 PDB 응답을 주입해 실제 대기 없이 episode를 검증한다."""
+        audit_log = tmp_path / "audit.log"
+        ticks = iter([0] + [now for now, _ in samples] + [10000])
+        responses = iter([
+            None if allowed is None else {"items": [{
+                "metadata": {"namespace": "prod", "name": "api"},
+                "status": {"disruptionsAllowed": allowed, "expectedPods": 2},
+            }]}
+            for _, allowed in samples
+        ])
+        rc = drain_watch.watch_loop(
+            phase="P4", audit_log=str(audit_log), interval=30,
+            max_duration=10000, scope="all", pdb_fail_after=fail_after,
+            poll_events=lambda: {"items": []}, poll_pdb=lambda: next(responses),
+            poll_nc=lambda: {"items": []}, sleep_fn=lambda _: None,
+            clock=lambda: next(ticks),
+        )
+        return rc, audit_log.read_text(encoding="utf-8")
+
+    def test_continuously_blocked_pdb_fails_at_threshold(self, tmp_path, capsys):
+        rc, content = self._run(tmp_path, [(0, 0), (599, 0), (600, 0), (630, 0)])
+        detail = "DisruptionBlockedSustained(PDB): prod/api disruptionsAllowed=0 for 600s"
+        assert rc == 1
+        assert content.count(detail) == 1
+        assert f"DRAIN-P4 | CRITICAL | FAIL | {detail}" in content
+        assert "| FAIL | DrainWatch finished: events=0 pdb=2 nodeclaim=0 (FAIL=1)" in content
+        assert f"[FAIL] {detail}" in capsys.readouterr().out
+
+    def test_resolved_before_threshold_warns_only(self, tmp_path):
+        rc, content = self._run(tmp_path, [(0, 0), (599, 1), (600, 1)])
+        assert rc == 0
+        assert content.count("DisruptionBlocked(PDB): prod/api disruptionsAllowed=0") == 1
+        assert "| FAIL |" not in content
+
+    def test_sustained_fail_is_not_repeated(self, tmp_path):
+        rc, content = self._run(tmp_path, [(now, 0) for now in range(0, 1801, 30)])
+        assert rc == 1
+        assert content.count("DisruptionBlockedSustained(PDB)") == 1
+        assert "(FAIL=1)" in content
+
+    def test_recurrence_starts_new_timer_and_warns_again(self, tmp_path):
+        rc, content = self._run(tmp_path, [(0, 0), (599, 1), (600, 0), (1199, 0)])
+        assert rc == 0
+        assert content.count("DisruptionBlocked(PDB)") == 2
+        assert "| FAIL |" not in content
+
+    def test_poll_failure_preserves_episode_timer(self, tmp_path):
+        rc, content = self._run(tmp_path, [(0, 0), (300, None), (600, 0)])
+        assert rc == 1
+        assert content.count("DisruptionBlocked(PDB)") == 1
+        assert content.count("DisruptionBlockedSustained(PDB)") == 1
+        assert "disruptionsAllowed=0 for 600s" in content
+
+    def test_recurrence_after_fail_can_fail_again(self, tmp_path):
+        rc, content = self._run(tmp_path, [(0, 0), (600, 0), (630, 1),
+                                            (660, 0), (1259, 0), (1260, 0)])
+        assert rc == 1
+        assert content.count("DisruptionBlocked(PDB)") == 2
+        assert content.count("DisruptionBlockedSustained(PDB)") == 2
+        assert "(FAIL=2)" in content
+
+    def test_custom_threshold_is_used(self, tmp_path):
+        rc, content = self._run(tmp_path, [(0, 0), (59, 0), (60, 0)], fail_after=60)
+        assert rc == 1
+        assert content.count("DisruptionBlockedSustained(PDB)") == 1
+        assert "disruptionsAllowed=0 for 60s" in content
+
+
+    def test_pdb_timers_are_independent_and_input_is_unchanged(self):
+        episodes = {"prod/api": (0, False), "other/api": (300, False)}
+        pdbs = {"items": [
+            {"metadata": {"namespace": ns, "name": "api"},
+             "status": {"disruptionsAllowed": 0, "expectedPods": 2}}
+            for ns in ("prod", "other")
+        ]}
+        signals, updated = drain_watch.extract_blocked_pdbs(pdbs, episodes, 600, 600)
+        assert signals == [{"ns": "prod", "name": "api", "severity": "FAIL", "elapsed": 600}]
+        assert updated == {"prod/api": (0, True), "other/api": (300, False)}
+        assert episodes == {"prod/api": (0, False), "other/api": (300, False)}
+
+
+class TestPdbFailAfterCli:
+    def test_default_and_custom_threshold_passed_to_loop(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/kubectl")
+        calls = []
+
+        def watch_loop(**kwargs):
+            calls.append(kwargs)
+            return 0
+
+        monkeypatch.setattr(drain_watch, "watch_loop", watch_loop)
+        argv = ["drain_watch.py", "--phase", "P4", "--audit-log", "audit.log"]
+        for options, expected in [([], 600), (["--pdb-fail-after", "120"], 120)]:
+            monkeypatch.setattr("sys.argv", argv + options)
+            assert drain_watch.main() == 0
+            assert calls[-1]["pdb_fail_after"] == expected
+
+    def test_nonpositive_threshold_rejected_before_monitor_starts(self, monkeypatch):
+        import pytest
+
+        for value in ("0", "-1"):
+            monkeypatch.setattr("sys.argv", ["drain_watch.py", "--phase", "P4",
+                                             "--audit-log", "audit.log",
+                                             "--pdb-fail-after", value])
+            with pytest.raises(SystemExit) as exc:
+                drain_watch.main()
+            assert exc.value.code == 2

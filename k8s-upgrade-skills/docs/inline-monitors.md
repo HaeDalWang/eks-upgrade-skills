@@ -57,15 +57,18 @@ safe to write concurrently with the gate scripts).
 |--------|--------|----------|
 | Warning events | `FailedDrain`, `NodeClaimTerminationFailed` | FAIL |
 | Warning events | `DisruptionBlocked`, `ExceededGracePeriod`, `FailedKillPod`, `NodeNotReady`, `NodeNotSchedulable`, `OOMKilling`, `FailedMount`, `NodeClaimNotFound`, `Evicted` | WARN |
-| PDB status | `disruptionsAllowed == 0` (expectedPods > 0) — drain blocked | WARN |
+| PDB status | `disruptionsAllowed == 0` (expectedPods > 0) — transient/normal during a roll; investigate, never force | WARN |
+| PDB status | Same PDB continuously blocked ≥ 10 min (default `--pdb-fail-after 600`): `DisruptionBlockedSustained(PDB)` — STOP and investigate, never force | FAIL |
 | NodeClaim status (Phase 5) | `Ready != True` with a reason | WARN |
 
 **Intentionally excluded**: `BackOff` — it fires constantly from CrashLoop/ImagePull unrelated to
 draining and would flood audit.log. drain_watch focuses on genuine drain-risk signals.
 
 De-duplication: events are keyed by `uid:count` (a higher count = a genuine recurrence, re-emitted).
-PDB/NodeClaim are state-based — recorded once while active, dropped from the seen-set when resolved
-so a recurrence is recorded again.
+PDB/NodeClaim are state-based. Each PDB episode records WARN on first detection and one FAIL when
+continuously blocked for `--pdb-fail-after` seconds (default 600). Resolution resets the timer and FAIL
+state; recurrence starts with WARN and a new timer. A failed kubectl poll preserves the episode state.
+NodeClaims are recorded once while active and again after resolution and recurrence.
 
 ---
 

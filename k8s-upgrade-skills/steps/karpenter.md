@@ -41,7 +41,9 @@ python3 scripts/drain_watch.py --phase P5 --scope all --audit-log audit.log
 
 It polls Warning events, PDB status and NodeClaim Ready conditions every 30 s and appends `DRAIN-P5`
 lines. Wait for `DRAIN-P5 | START` with a pid. Brief `NodeClaimNotReady` WARNs are expected; a
-sustained one or any FAIL means STOP.
+sustained one or any FAIL means STOP. `DisruptionBlocked(PDB)` WARNs are transient/normal during a
+roll: investigate, never force. Continuous blocking for ≥ 10 min (default `--pdb-fail-after 600`)
+emits `DisruptionBlockedSustained(PDB)` FAIL: STOP and investigate, never force.
 
 ## 5-0b. Start the service monitor (only when the recipe has `services`)
 
