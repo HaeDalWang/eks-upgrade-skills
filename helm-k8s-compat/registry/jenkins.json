@@ -1,0 +1,13 @@
+{
+  "chart_name": "jenkins",
+  "sources": [
+    "https://github.com/jenkinsci/helm-charts/blob/main/charts/jenkins/values.yaml"
+  ],
+  "risky_values": [
+    {
+      "path": "controller.installLatestPlugins",
+      "value": true,
+      "reason": "재기동 시 외부 최신 플러그인 다운로드로 기동 실패 위험; 플러그인 버전 고정 및 설치 정책 확인"
+    }
+  ]
+}

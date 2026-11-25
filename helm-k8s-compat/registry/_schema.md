@@ -315,7 +315,7 @@ Karpenter 공식 표가 이 형태라, window로 옮기려면 사람이 각 차�
 | lifecycle / unknown / hazards / k8s_breaks HIGH | HIGH | exit 2 (확인) |
 | 전부 통과 | — | exit 0 |
 
-- `exit 0` = PASS / `exit 1` = FAIL(차단) / `exit 2` = WARN(수동 검토) / `exit 64` = 입력 오류(게이트 판정 아님) / `exit 127` = helm 미존재
+- `exit 0` = PASS / `exit 1` = FAIL(차단/저장 오류) / `exit 2` = WARN(수동 검토) / `exit 64` = 입력 오류(Not a gate verdict; Never treat as WARN) / `exit 127` = helm 미존재
 - registry에 없는 차트 → "수동 검토 필요" INFO (gate 차단 안 함). 체커가 `kubeVersion`을 직접
   읽지는 않으므로, 검토 시 `helm show chart`·릴리스 노트를 사람이 확인한다.
 
@@ -336,3 +336,31 @@ Karpenter 공식 표가 이 형태라, window로 옮기려면 사람이 각 차�
 7. 과거 K8s API 제거에 물리면 k8s_breaks 추가
 8. **`last_verified`를 실제 조회한 날짜로 기록** — 추측 금지
 9. `tests/test_helm_compat_check.py`에 평가 테스트 추가
+
+
+## Optional `risky_values` / `sources`
+
+`risky_values` is an optional array of chart-specific rules. Existing entries without it retain their prior evaluation. No generic patterns (such as image tag latest) are inferred.
+
+```json
+{
+  "chart_name": "jenkins",
+  "sources": ["https://github.com/jenkinsci/helm-charts/blob/main/charts/jenkins/values.yaml"],
+  "risky_values": [{
+    "path": "controller.installLatestPlugins",
+    "value": true,
+    "reason": "재기동 시 외부 최신 플러그인 다운로드로 기동 실패 위험"
+  }]
+}
+```
+
+- `path`: non-empty dot-separated object keys (no array indexing or escaped dots).
+- `value`: exact JSON value; equality includes type (boolean true does not match integer 1 or string "true").
+- `reason`: non-empty chart-specific risk explanation, emitted on WARN. Values themselves are not logged.
+- `sources`: optional official evidence URLs, informational; not automatically fetched.
+- Installed values come from `helm get values <release> -n <ns> --all -o json` (including chart defaults) or the injected release's `values` object containing equivalent computed values. A missing path is INFO (경로 없음); a failed read is unknown + reason WARN, never an assumed default. A known mismatch is PASS for this rule only.
+- A minimal risky-values-only entry may omit support/lifecycle/last_verified/compat_source. It emits HELM-UNKNOWN INFO for compatibility (as an unregistered chart did), with no fabricated PASS, staleness, or upgrade hazard. Support entries retain the required fields documented above.
+
+Ruling: Jenkins starts as a risky-values-only entry — no compatibility evidence was researched, and registering one values rule must not manufacture support knowledge or make every nonmatching installation WARN. Add support only with separate official evidence.
+
+Ruling: Kiali operator has a separate entry — shared released-version scheme is unknown (master Chart.yaml versions are placeholders); the official install guide confirms the operator manages a Kiali CRD while server is standalone. The server's zero coupling surface and verified upper-bound record cannot be reused. Sources are preserved in kiali-operator.json. Use chart_name aliases only when both version scheme and applicable compatibility evidence are verified to be shared.

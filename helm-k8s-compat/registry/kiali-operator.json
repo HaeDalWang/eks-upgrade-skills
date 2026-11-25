@@ -1,0 +1,24 @@
+{
+  "chart_name": "kiali-operator",
+  "last_verified": "2026-11-25",
+  "repo": "https://kiali.org/helm-charts",
+  "compat_source": "https://kiali.io/docs/installation/installation-guide/install-with-helm/",
+  "chart_to_app": "app_version",
+  "has_crds": true,
+  "sources": [
+    "https://kiali.io/docs/installation/installation-guide/install-with-helm/",
+    "https://github.com/kiali/helm-charts/blob/master/kiali-operator/Chart.yaml",
+    "https://github.com/kiali/helm-charts/blob/master/kiali-server/Chart.yaml"
+  ],
+  "note": "버전 체계 공유 여부 unknown — master Chart.yaml의 0.0.0은 출시 버전 근거가 아님. server와 달리 operator는 Kiali CRD를 관리하므로 server의 surface/확인 상한을 재사용하지 않는다.",
+  "support": {
+    "type": "unknown",
+    "evidence": "official_doc",
+    "note": "K8s 호환성 상한 unknown — 공식 설치 문서에 버전별 매트릭스 없음"
+  },
+  "lifecycle": {
+    "type": "none"
+  },
+  "upgrade_hazards": [],
+  "k8s_breaks": {}
+}

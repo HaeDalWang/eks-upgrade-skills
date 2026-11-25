@@ -21,7 +21,6 @@ The verdict is produced by a deterministic Python script (`helm_compat_check.py`
 single source of truth — the LLM interprets and reports, but cannot override the gate.
 
 All scripts are in `./scripts/`. The curated knowledge base is in `./registry/`.
-
 ---
 
 ## When to Use
@@ -43,11 +42,12 @@ the main upgrade skill is installed.
 
 | Requirement | Purpose |
 |---|---|
-| `helm` CLI (v3+) with cluster access | List installed releases (`helm ls -A`) |
+| `helm` CLI (v3+) with cluster access | List releases and read registered risky values (`helm get values --all`) |
+| `kubectl` with Pod read access | Inspect release Pods within each namespace |
 | `python3` (3.9+) | Run the checker (stdlib only, no third-party deps) |
 | Current + target K8s version | e.g. `1.33` → `1.34` |
 
-> The checker can also run **without a cluster** via `--releases-json` injection (testing / dry-run).
+> The checker can also run **without a cluster** via `--releases-json` injection (optional `--pods-json` for health) (testing / dry-run).
 
 ---
 
@@ -90,7 +90,13 @@ The script does the following automatically:
    - **lifecycle** — is the chart retired, or is the installed release past its EOL date?
    - **upgrade_hazards** — if the chart must be bumped, what manual steps bite (CRD re-apply, IAM, webhook, removed flags)?
    - **k8s_breaks** — removed/changed APIs in the jump window (`current < V <= target`).
-4. Append findings to the audit log and exit with a gate code.
+4. Inspect namespace-scoped Pods with `app.kubernetes.io/instance=<release>`: phase outside Running/Succeeded **or** container READY `a/b` with `a != b` is unhealthy (including Running `2/3`). Missing container status counts as not ready.
+5. Compare installed `helm get values <release> -n <ns> --all -o json` against chart-specific `risky_values`; exact typed matches WARN. Collection failure is `unknown` WARN; a missing path in computed values is INFO (경로 없음). Each injected release's `values` object must contain computed values including chart defaults, equivalent to `--all`.
+6. Append findings to the audit log and exit with a gate code.
+
+Use `--health-out before.json` before work and `--health-baseline before.json --health-out after.json` afterwards. Baseline suppresses only identical Pod name/phase/READY anomalies to INFO (기존 장애); new/changed anomalies WARN. Without baseline, anomalies WARN with existing/new `unknown`. Snapshots contain health only, never Helm values. Baselines must come from the same cluster; cluster identity is not verified.
+
+Offline input: `--releases-json '[{"name":"ci","namespace":"build","chart":"jenkins-5.0.0","values":{"controller":{"installLatestPlugins":false}}}]' --pods-json '{"items":[...]}'`. `--pods-json` accepts a Kubernetes PodList, with metadata name/namespace/labels, spec containers and status phase/containerStatuses. With `--releases-json` and no `--pods-json`, no kubectl is called: INFO "health 미검사(pods 미주입)". Only live release listing enables live Pod reads. No matching Pods is INFO "검사 범위 밖(일치 Pod 없음)"; failed live Pod/values reads yield `unknown` + reason WARN. Only instance-labelled Pods are covered; operator-managed Pods without that label require separate inspection.
 
 > If `helm` is unavailable or the cluster is unreachable, the script exits `127`. Do not silently
 > treat this as a pass — report it and ask the user to fix access.
@@ -102,12 +108,12 @@ The script does the following automatically:
 | Exit | Meaning | Action |
 |---|---|---|
 | `0` | OPEN — no compatibility problems | Proceed. |
-| `1` | BLOCKED — CRITICAL finding(s) | **Stop.** A chart does not support the target version (or hits a removed API). Resolve before upgrading. |
+| `1` | BLOCKED — CRITICAL finding(s) or output write failure | **Stop.** A chart does not support the target version (or hits a removed API). Resolve before upgrading. |
 | `2` | WARN — HIGH finding(s) | Manual review required. Surface every finding to the user and get explicit confirmation. |
-| `64` | Usage error — bad version string, downgrade, malformed `--releases-json` | **Not a gate verdict.** Fix the invocation and re-run. Never treat as WARN. |
-| `127` | helm CLI missing / no cluster access | Report; ask user to install helm or fix kubeconfig. Not a pass. |
+| `64` | Usage error — invalid CLI/JSON/baseline | **Not a gate verdict.** Fix the invocation and re-run. Never treat as WARN. |
+| `127` | helm release listing unavailable / no cluster access | Report; ask user to install helm or fix kubeconfig. Not a pass. |
 
-**The exit code is authoritative.** Read it directly; never re-derive the verdict from the printed text.
+Every non-zero exit ends with `NEXT:`. Input errors stop with exit `64`; fix the invocation before re-running. **The exit code is authoritative.** Read it directly; never re-derive the verdict from the printed text.
 
 ---
 

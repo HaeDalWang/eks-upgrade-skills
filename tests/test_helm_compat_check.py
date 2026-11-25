@@ -681,3 +681,82 @@ class TestEvidenceGatesTheClaim:
             self._entry("official_doc"), installed_chart_ver="1.0.0",
             installed_app_ver="1.0.0", target_k8s="1.36")
         assert f.severity == "MEDIUM"
+
+
+class TestE7RegistryAndLiveInputs:
+    def test_all_31_original_registry_files_still_load(self, capsys):
+        from pathlib import Path
+        registry_dir = Path(__file__).resolve().parents[1] / "helm-k8s-compat" / "registry"
+        originals = [p for p in registry_dir.glob("*.json")
+                     if p.stem not in ("jenkins", "kiali-operator")]
+        assert len(originals) == 31
+        registry = compat_lib.load_registry(str(registry_dir))
+        for path in originals:
+            data = json.loads(path.read_text())
+            names = data["chart_name"]
+            for name in names if isinstance(names, list) else [names]:
+                assert registry[name] == {**data, "chart_name": name}
+                assert compat_lib.risky_values_findings(registry[name], None, name) == []
+        assert not capsys.readouterr().err
+        assert registry["kiali-server"]["has_crds"] is False
+        assert registry["kiali-operator"]["has_crds"] is True
+        assert registry["kiali-operator"]["sources"]
+
+    @pytest.mark.parametrize("values_json, expected, message", [
+        ('{"controller":{"installLatestPlugins":true}}', 2, "installLatestPlugins"),
+        ('{}', 0, "경로 없음"),
+        (None, 2, "unknown")])
+    def test_live_pods_and_computed_values_are_release_scoped(
+            self, monkeypatch, tmp_path, values_json, expected, message):
+        import health_inputs
+        import helm_compat_check
+        from pathlib import Path
+        commands = []
+
+        def run(command, **kwargs):
+            import subprocess
+            commands.append(command)
+            if command[:2] == ["kubectl", "get"]:
+                return subprocess.CompletedProcess(command, 0, '{"items": []}', '')
+            return subprocess.CompletedProcess(command, 1 if values_json is None else 0,
+                                               values_json or "", "")
+
+        monkeypatch.setattr(health_inputs.subprocess, "run", run)
+        release = {"name": "ci", "namespace": "build", "chart": "jenkins-5.0.0"}
+        monkeypatch.setattr(helm_compat_check, "fetch_releases_from_helm", lambda: [release])
+        registry = Path(__file__).resolve().parents[1] / "helm-k8s-compat" / "registry"
+        monkeypatch.setattr(helm_compat_check.sys, "argv", [
+            "checker", "--current", "1.33", "--target", "1.34", "--registry-dir", str(registry),
+            "--audit-log", str(tmp_path / "audit.log")])
+        assert helm_compat_check.main() == expected
+        audit = (tmp_path / "audit.log").read_text()
+        assert "HELM-VALUES" in audit and message in audit
+        assert commands == [
+            ["kubectl", "get", "pods", "-n", "build", "-l", "app.kubernetes.io/instance=ci", "-o", "json"],
+            ["helm", "get", "values", "ci", "-n", "build", "--all", "-o", "json"]]
+
+    @pytest.mark.parametrize("baseline", [None, {"releases": {"apps/app": {"unhealthy": [], "unknown": "CLI 미존재"}}}])
+    def test_live_pod_failure_records_unknown_reason(self, monkeypatch, baseline):
+        import health_inputs
+
+        def missing(*args, **kwargs):
+            raise FileNotFoundError()
+
+        monkeypatch.setattr(health_inputs.subprocess, "run", missing)
+        health = health_inputs.observe_health({"name": "app", "namespace": "apps"}, None)
+        findings = compat_lib.health_findings("apps/app", health, baseline)
+        assert findings[0].severity == "HIGH"
+        assert "unknown" in findings[0].detail and "CLI 미존재" in findings[0].detail
+
+    def test_invalid_risky_values_rule_rejected(self, tmp_path):
+        (tmp_path / "bad.json").write_text(json.dumps({
+            "chart_name": "bad", "risky_values": [{"path": "controller..bad", "value": True}]}))
+        with pytest.raises(ValueError, match="risky_values"):
+            compat_lib.load_registry(str(tmp_path))
+
+
+    def test_nested_risky_value_equality_preserves_json_types(self):
+        entry = {"risky_values": [{"path": "config", "value": {"enabled": True},
+                                  "reason": "chart-specific risk"}]}
+        finding = compat_lib.risky_values_findings(entry, {"config": {"enabled": 1}}, "apps/app")
+        assert finding[0].result == "PASS"
