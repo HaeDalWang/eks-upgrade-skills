@@ -34,7 +34,7 @@
   },
   "target_ami": "1.34.0-20261121",
   "recipe": "---\ncluster_name: demo-eks\ntarget_version: \"1.34\"\noutput_language: ko\n---\n\n## 업그레이드 컨텍스트\n인증 프리픽스와 별도 var-file 없음. 서비스 감시 미설정.\n",
-  "prompt": "설치된 k8s-upgrade-skills skill을 사용하여 현재 Terraform 프로젝트의 demo-eks를 1.33에서 1.34로 업그레이드해 주세요. recipe.md를 읽고 현재 skill 절차를 그대로 따르세요. 사용자에게 필요한 질문은 번호가 있는 텍스트로 물어보세요. 모든 작업과 최종 보고서 작성까지 끝났을 때 마지막 줄에 EVAL_DONE을 적으세요.",
+  "prompt": "설치된 eks-upgrade-skills skill을 사용하여 현재 Terraform 프로젝트의 demo-eks를 1.33에서 1.34로 업그레이드해 주세요. recipe.md를 읽고 현재 skill 절차를 그대로 따르세요. 사용자에게 필요한 질문은 번호가 있는 텍스트로 물어보세요. 모든 작업과 최종 보고서 작성까지 끝났을 때 마지막 줄에 EVAL_DONE을 적으세요.",
   "answers": [
     {
       "id": "approve-plan",

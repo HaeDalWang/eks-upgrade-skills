@@ -20,50 +20,50 @@ python3 -m pytest tests/test_gate_check.py::TestCom002MalformedVersion -v
 python3 -m pytest tests/test_phase_gate.py::TestClassifyPods::test_running_not_ready_blocking -v
 
 # 스크립트 직접 실행 (개발 중 검증)
-python3 k8s-upgrade-skills/scripts/gate_check.py \
+python3 eks-upgrade-skills/scripts/gate_check.py \
   --cluster-name my-cluster \
   --current-version 1.33 \
   --target-version 1.34 \
   --tf-dir /path/to/terraform \
   --audit-log audit.log
 
-python3 k8s-upgrade-skills/scripts/phase_gate.py phase4 \
+python3 eks-upgrade-skills/scripts/phase_gate.py phase4 \
   --cluster-name my-cluster \
   --target-version 1.34 \
   --audit-log audit.log
 
 # saved plan 검증 후 apply 직전 안전장치 (terraform plan -out으로 만든 파일)
-python3 k8s-upgrade-skills/scripts/plan_check.py \
+python3 eks-upgrade-skills/scripts/plan_check.py \
   --planfile /path/to/terraform/cp.tfplan --step cp --target-version 1.34 \
   --tf-dir /path/to/terraform --audit-log audit.log
-python3 k8s-upgrade-skills/scripts/apply_guard.py \
+python3 eks-upgrade-skills/scripts/apply_guard.py \
   --planfile /path/to/terraform/cp.tfplan --step cp \
   --cluster-name my-cluster --target-version 1.34 --audit-log audit.log
 
 # 사용자 직접 apply 후 state 확인 (guard가 PASS인 동일 saved plan)
-python3 k8s-upgrade-skills/scripts/apply_confirm.py \
+python3 eks-upgrade-skills/scripts/apply_confirm.py \
   --planfile /path/to/terraform/cp.tfplan --plan-doc upgrade-plan.json \
   --tf-dir /path/to/terraform --auth-prefix "" \
   --cluster-name my-cluster --target-version 1.34 --audit-log audit.log
 
 # 인라인 드레인 모니터 — 메인 에이전트가 run_in_background로 실행 (sub-agent 아님)
-python3 k8s-upgrade-skills/scripts/drain_watch.py \
+python3 eks-upgrade-skills/scripts/drain_watch.py \
   --phase P4 --scope all --audit-log audit.log
 
 # 인라인 서비스 모니터 — recipe에 services가 있을 때만 (Phase 4/5)
-python3 k8s-upgrade-skills/scripts/service_watch.py \
+python3 eks-upgrade-skills/scripts/service_watch.py \
   --phase P4 --audit-log audit.log \
   --services-json '[{"name":"my-api","namespace":"prod","min_endpoints":2}]'
 
 # 단일 이벤트 직접 기록 (LLM-side 이벤트용 — lib.audit_append 래퍼)
-python3 k8s-upgrade-skills/scripts/audit_event.py \
+python3 eks-upgrade-skills/scripts/audit_event.py \
   --audit-log audit.log \
   --rule-id "DRAIN-P4" \
   --result "WARN" \
   --detail "FailedDrain: node/ip-10-0-1-23 — PDB my-api disruptionsAllowed=0"
 
 # recipe 검증 (recipe.md 또는 recipe.yaml 모두 지원)
-python3 k8s-upgrade-skills/scripts/validate_recipe.py recipe.md
+python3 eks-upgrade-skills/scripts/validate_recipe.py recipe.md
 
 # Helm 차트 호환성 점검 (독립 스킬 — 클러스터 없이 --releases-json 주입 가능)
 python3 helm-k8s-compat/scripts/helm_compat_check.py \
@@ -73,11 +73,11 @@ python3 helm-k8s-compat/scripts/helm_compat_check.py \
 
 # Plugin 설치 / 상태 확인
 claude plugin marketplace add .
-claude plugin install k8s-upgrade-skills@k8s-upgrade-skills
+claude plugin install eks-upgrade-skills@eks-upgrade-skills
 claude plugin list
 claude plugin validate .
-codex plugin marketplace add HaeDalWang/k8s-upgrade-skills
-codex plugin add k8s-upgrade-skills@k8s-upgrade-skills  # /hooks에서 hook 신뢰
+codex plugin marketplace add HaeDalWang/eks-upgrade-skills
+codex plugin add eks-upgrade-skills@eks-upgrade-skills  # /hooks에서 hook 신뢰
 ```
 
 ## 아키텍처
@@ -99,7 +99,7 @@ codex plugin add k8s-upgrade-skills@k8s-upgrade-skills  # /hooks에서 hook 신�
 .claude-plugin/             ← plugin.json + self-marketplace marketplace.json
 hooks/                     ← hooks.json + apply_guard_hook.py (PreToolUse)
 
-k8s-upgrade-skills/          ← AI Agent가 읽는 스킬 디렉토리 (plugin으로 설치됨)
+eks-upgrade-skills/          ← AI Agent가 읽는 스킬 디렉토리 (plugin으로 설치됨)
 ├── SKILL.md                 ← 진입점(≤170줄): 시작 흐름, 절대 규칙, exit code/NEXT, 인증, step 루프, 압축 후 복구
 ├── steps/                   ← Phase별 자기완결 절차 (각 파일은 upgrade_plan.py next로 시작)
 │   ├── start.md             ← discover → Phase 0 → 인터뷰 → recipe → plan → 승인
@@ -229,7 +229,7 @@ Python 3.9+ 지원. `dict | None` 타입 힌트 사용 불가 → `Optional[dict
 ```bash
 # 1. 스킬 설치
 claude plugin marketplace add .
-claude plugin install k8s-upgrade-skills@k8s-upgrade-skills
+claude plugin install eks-upgrade-skills@eks-upgrade-skills
 
 # 2. EKS 프로젝트 루트에서 AI Agent에게 요청
 # "EKS 클러스터를 업그레이드해줘"

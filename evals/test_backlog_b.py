@@ -196,7 +196,7 @@ if not second:
     time.sleep(60)
     (run / 'finished-first-turn').touch()
 if second:
-    script = next((run / 'home/.claude/plugins/cache').glob('*/*/*/k8s-upgrade-skills/scripts/upgrade_plan.py'))
+    script = next((run / 'home/.claude/plugins/cache').glob('*/*/*/eks-upgrade-skills/scripts/upgrade_plan.py'))
     result = subprocess.run([str(run / 'bin/python3'), str(script), 'next'], capture_output=True, text=True)
     assert result.returncode == 0 and json.loads(result.stdout)['id'] == 'nodes'
 print(json.dumps({'type': 'result', 'session_id': 'new-session' if second else 'old-session',

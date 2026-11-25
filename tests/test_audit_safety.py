@@ -110,7 +110,7 @@ def test_skill_revision_asks_git_in_skill_directory(monkeypatch):
 @pytest.mark.parametrize("script", ["gate_check.py", "phase_gate.py", "plan_check.py", "apply_guard.py"])
 def test_invalid_gate_arguments_exit_one_with_final_next_stop(script):
     import sys
-    result = subprocess.run([sys.executable, "k8s-upgrade-skills/scripts/" + script],
+    result = subprocess.run([sys.executable, "eks-upgrade-skills/scripts/" + script],
                             capture_output=True, text=True)
     assert result.returncode == 1
     assert result.stdout.splitlines()[-1].startswith("NEXT: STOP ")

@@ -1,6 +1,6 @@
 # EKS + Terraform 예제
 
-K8s Upgrade Skills를 테스트하기 위한 EKS 참조 인프라입니다.
+EKS Upgrade Skills를 테스트하기 위한 EKS 참조 인프라입니다.
 EKS 클러스터 + Managed Node Group + Karpenter + Add-on 구성이 포함되어 있고, 업그레이드 시 발생할 수 있는 위험 시나리오 샘플도 함께 제공합니다.
 
 ## 사전 준비

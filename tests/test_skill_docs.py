@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-SKILL_ROOT = Path(__file__).resolve().parents[1] / "k8s-upgrade-skills"
+SKILL_ROOT = Path(__file__).resolve().parents[1] / "eks-upgrade-skills"
 SKILL = SKILL_ROOT / "SKILL.md"
 STEPS = sorted((SKILL_ROOT / "steps").glob("*.md"))
 OWNER = {2: "cp.md", 3: "addons.md", 4: "nodes.md", 5: "karpenter.md", 6: "full.md", 7: "final.md"}
@@ -219,8 +219,8 @@ def test_plugin_manifest_paths_and_hook_command_exist():
     plugin = json.loads((root / '.claude-plugin/plugin.json').read_text())
     marketplace = json.loads((root / '.claude-plugin/marketplace.json').read_text())
     hooks = json.loads((root / 'hooks/hooks.json').read_text())
-    assert plugin['name'] == marketplace['name'] == 'k8s-upgrade-skills'
-    assert plugin['skills'] == ['./k8s-upgrade-skills', './helm-k8s-compat']
+    assert plugin['name'] == marketplace['name'] == 'eks-upgrade-skills'
+    assert plugin['skills'] == ['./eks-upgrade-skills', './helm-k8s-compat']
     assert all((root / path / 'SKILL.md').is_file() for path in plugin['skills'])
     assert marketplace['plugins'] == [{'name': plugin['name'], 'source': './'}]
     entry = hooks['hooks']['PreToolUse'][0]

@@ -35,7 +35,7 @@ services:
   이 파일을 EKS 프로젝트 루트에 배치하세요. 없으면 AI Agent가 탐색(discover.py)과
   한 번의 질문으로 직접 만들고, 있으면 이전 답변으로 재사용합니다.
 
-  검증: python3 k8s-upgrade-skills/scripts/validate_recipe.py recipe.md
+  검증: python3 eks-upgrade-skills/scripts/validate_recipe.py recipe.md
 
   ─────────────────────────────────────────────────────────────
   파일 구조

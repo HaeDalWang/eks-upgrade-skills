@@ -22,7 +22,7 @@ class TestAuditEventBasic:
         rc = audit_event.main.__wrapped__ if hasattr(audit_event.main, "__wrapped__") else None
 
         result = subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/audit_event.py",
+            [sys.executable, "eks-upgrade-skills/scripts/audit_event.py",
              "--audit-log", log,
              "--rule-id", "DRAIN-P4",
              "--result", "WARN",
@@ -39,7 +39,7 @@ class TestAuditEventBasic:
         """기록 형식이 audit_write()와 동일한지 확인: timestamp | rule_id | result | detail"""
         log = str(tmp_path / "audit.log")
         subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/audit_event.py",
+            [sys.executable, "eks-upgrade-skills/scripts/audit_event.py",
              "--audit-log", log,
              "--rule-id", "DRAIN-P2",
              "--result", "FAIL",
@@ -59,7 +59,7 @@ class TestAuditEventBasic:
         log = str(tmp_path / "audit.log")
         for i in range(3):
             subprocess.run(
-                [sys.executable, "k8s-upgrade-skills/scripts/audit_event.py",
+                [sys.executable, "eks-upgrade-skills/scripts/audit_event.py",
                  "--audit-log", log,
                  "--rule-id", f"DRAIN-P4-{i}",
                  "--result", "WARN",
@@ -79,7 +79,7 @@ class TestAuditEventBasic:
             f.write("existing content\n")
 
         subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/audit_event.py",
+            [sys.executable, "eks-upgrade-skills/scripts/audit_event.py",
              "--audit-log", log,
              "--rule-id", "DRAIN-P5",
              "--result", "INFO",
@@ -99,7 +99,7 @@ class TestAuditEventResultValues:
         """유효한 result 값 모두 허용."""
         log = str(tmp_path / "audit.log")
         r = subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/audit_event.py",
+            [sys.executable, "eks-upgrade-skills/scripts/audit_event.py",
              "--audit-log", log,
              "--rule-id", "TEST",
              "--result", result,
@@ -112,7 +112,7 @@ class TestAuditEventResultValues:
         """유효하지 않은 result 값 거부."""
         log = str(tmp_path / "audit.log")
         r = subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/audit_event.py",
+            [sys.executable, "eks-upgrade-skills/scripts/audit_event.py",
              "--audit-log", log,
              "--rule-id", "TEST",
              "--result", "UNKNOWN",
@@ -128,7 +128,7 @@ class TestAuditEventErrorHandling:
     def test_missing_required_args_returns_nonzero(self, tmp_path):
         """필수 인자 누락 시 비정상 종료."""
         r = subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/audit_event.py",
+            [sys.executable, "eks-upgrade-skills/scripts/audit_event.py",
              "--audit-log", str(tmp_path / "audit.log")],
             capture_output=True, text=True
         )
@@ -137,7 +137,7 @@ class TestAuditEventErrorHandling:
     def test_unwritable_path_returns_1(self):
         """쓰기 불가 경로 → exit 1."""
         r = subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/audit_event.py",
+            [sys.executable, "eks-upgrade-skills/scripts/audit_event.py",
              "--audit-log", "/nonexistent/path/audit.log",
              "--rule-id", "TEST",
              "--result", "WARN",
@@ -152,7 +152,7 @@ class TestAuditEventErrorHandling:
         import re
         log = str(tmp_path / "audit.log")
         subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/audit_event.py",
+            [sys.executable, "eks-upgrade-skills/scripts/audit_event.py",
              "--audit-log", log,
              "--rule-id", "DRAIN-P4",
              "--result", "WARN",
@@ -171,7 +171,7 @@ class TestAuditEventCoexistence:
     def test_does_not_interfere_with_audit_flush(self, tmp_path):
         """audit_event.py 기록 후 audit_flush()가 정상 동작하는지 확인."""
         import sys
-        sys.path.insert(0, "k8s-upgrade-skills/scripts")
+        sys.path.insert(0, "eks-upgrade-skills/scripts")
         import lib
         lib.reset_gate()
 
@@ -179,7 +179,7 @@ class TestAuditEventCoexistence:
 
         # Sub-Agent가 이벤트 기록
         subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/audit_event.py",
+            [sys.executable, "eks-upgrade-skills/scripts/audit_event.py",
              "--audit-log", log,
              "--rule-id", "DRAIN-P4",
              "--result", "WARN",

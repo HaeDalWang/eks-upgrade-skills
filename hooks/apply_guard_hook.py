@@ -9,7 +9,7 @@ import shlex
 import sys
 
 ROOT = Path(os.environ.get('CLAUDE_PLUGIN_ROOT', Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(ROOT / 'k8s-upgrade-skills/scripts'))
+sys.path.insert(0, str(ROOT / 'eks-upgrade-skills/scripts'))
 
 
 def apply_commands(command, cwd):

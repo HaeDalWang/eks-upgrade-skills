@@ -127,7 +127,7 @@ def prepare(run, scenario, claude):
     guard(env, run / 'bin')
     commands = [
         [str(claude), 'plugin', 'marketplace', 'add', str(REPO)],
-        [str(claude), 'plugin', 'install', 'k8s-upgrade-skills@k8s-upgrade-skills'],
+        [str(claude), 'plugin', 'install', 'eks-upgrade-skills@eks-upgrade-skills'],
         [str(claude), 'plugin', 'list', '--json'],
     ]
     with (run / 'install.log').open('w') as log:
@@ -138,7 +138,7 @@ def prepare(run, scenario, claude):
             if installed.returncode:
                 raise RuntimeError('plugin installation failed: see install.log')
     plugins = json.loads(installed.stdout)
-    if not any(p.get('id') == 'k8s-upgrade-skills@k8s-upgrade-skills' and p.get('enabled') is True
+    if not any(p.get('id') == 'eks-upgrade-skills@eks-upgrade-skills' and p.get('enabled') is True
                for p in plugins):
         raise RuntimeError('plugin is not enabled: see install.log')
     return env

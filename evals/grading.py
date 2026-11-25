@@ -6,7 +6,7 @@ from pathlib import Path
 
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "k8s-upgrade-skills/scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eks-upgrade-skills/scripts"))
 from lib import parse_audit_line
 
 from .safety_checks import SAFETY_ASSERTIONS, safety_checks

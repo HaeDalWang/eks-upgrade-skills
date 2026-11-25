@@ -83,7 +83,7 @@ Fargate 프로파일 정의(IaC) 자체는 변경하지 않습니다. 다만 Con
 
 ### Q: 어떻게 설치하고 무엇이 함께 설치되나요?
 
-[README 설치 절차](README.md#2-설치)의 marketplace 명령으로 plugin을 설치합니다. `k8s-upgrade-skills`,
+[README 설치 절차](README.md#2-설치)의 marketplace 명령으로 plugin을 설치합니다. `eks-upgrade-skills`,
 `helm-k8s-compat`와 Bash PreToolUse hook이 함께 설치됩니다. Hook은 스킬 실행 중 saved planfile의
 `APPLY-GUARD PASS`와 현재 sha256이 일치해야 apply를 허용합니다.
 

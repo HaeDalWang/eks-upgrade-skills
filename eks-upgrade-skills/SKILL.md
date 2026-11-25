@@ -1,5 +1,5 @@
 ---
-name: k8s-upgrade-skills
+name: eks-upgrade-skills
 description: >
   Kubernetes version upgrade for Terraform-managed AWS EKS clusters.
   Discovers the Terraform/EKS layout, interviews once, plans, and enforces phase-gated safety.

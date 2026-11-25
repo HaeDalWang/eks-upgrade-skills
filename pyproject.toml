@@ -1,5 +1,5 @@
 [project]
-name = "k8s-upgrade-skills"
+name = "eks-upgrade-skills"
 version = "0.1.0"
 description = "AI Agent를 위한 Kubernetes 업그레이드 자동화 Skill"
 readme = "README.md"
@@ -16,6 +16,6 @@ test = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [
-    "k8s-upgrade-skills/scripts",
+    "eks-upgrade-skills/scripts",
     "helm-k8s-compat/scripts",
 ]
