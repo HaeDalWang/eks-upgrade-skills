@@ -464,3 +464,37 @@ def test_apply_command_render_preview_without_mutation(tmp_path):
         assert "<AUTH_PREFIX> terraform apply {}".format(Path(doc['tf_dir']) / (step['type'] + '.tfplan')) in rendered
     assert 'unknown' not in rendered.split('## Apply commands')[1].split('##')[0]
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("pool,kind,resolved,variable,target,other", [
+    ("MNG", "nodes", "release_version", "mng_ami", "mng.target_release", "alias"),
+    ("Karpenter", "karpenter", "alias", "node_alias", "karpenter.target_alias", "release_version"),
+])
+@pytest.mark.parametrize("missing", ["resolved", "variable"])
+def test_full_create_requires_each_discovered_ami_pair(tmp_path, capsys, pool, kind, resolved, variable, target, other, missing):
+    found = discovery_file(tmp_path, node_pools=[pool])
+    # Targeted step is fully populated by discovery; only full is incomplete.
+    extra = ["--expect", "full:" + other + "=other"]
+    if missing == "variable":
+        extra += ["--expect", "full:" + resolved + "=new"]
+    assert create_from(tmp_path, found, *extra) == 2
+    out = capsys.readouterr().out
+    name = target if missing == "resolved" else ("mng.ami_variable" if pool == "MNG" else "karpenter.alias_variable")
+    assert "NEXT: ASK_USER" in out and name in out
+    assert not (tmp_path / "upgrade-plan.json").exists()
+
+
+def test_full_cli_expectations_override_discovery(tmp_path):
+    found = discovery_file(tmp_path)
+    assert create_from(tmp_path, found, "--expect", "full:release_version=custom-release",
+                       "--expect", "full:mng_ami=custom-release", "--expect", "full:alias=custom-alias",
+                       "--expect", "full:node_alias=custom-alias") == 0
+    full = json.loads((tmp_path / "upgrade-plan.json").read_text())["steps"][-1]
+    assert full["expect"] == {"release_version": ["custom-release"], "mng_ami": "custom-release",
+                               "alias": ["custom-alias"], "node_alias": "custom-alias"}
+
+
+def test_full_with_no_discovered_node_pools_needs_no_ami(tmp_path):
+    found = discovery_file(tmp_path, node_pools=[], mng={"present": False}, karpenter={"present": False})
+    assert create_from(tmp_path, found) == 0
+    assert json.loads((tmp_path / "upgrade-plan.json").read_text())["steps"][-1]["expect"] == {}

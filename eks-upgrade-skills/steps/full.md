@@ -6,8 +6,8 @@ python3 scripts/upgrade_plan.py next --plan-doc "${PLAN_DOC}" --audit-log audit.
 
 The current step must be `full` (default id `full`); any other step → return to the SKILL.md step loop.
 A full plan catches the drift the targeted steps left. AMI expectations come from the approved
-`full.expect`. A changed/unknown AMI without an expectation returns `NEXT: ASK_USER`: handle it with
-`skip`/ASK_USER (DEVIATION), because re-approval is refused mid-run. Never pass new expectations.
+`full.expect`. A changed/unknown AMI without an expectation returns exit 1, `NEXT: STOP`:
+stop and follow [failure.md](failure.md). Re-approval is refused mid-run; never pass new expectations.
 
 Re-derive the discovery variables (also after compaction). `AUTH_PREFIX`, `TF_VAR_FILE` and `services`
 come from `recipe.md`; a `*_FILE` of `default` means the file the user named in the interview:
@@ -39,6 +39,8 @@ python3 scripts/plan_check.py --planfile "${TF_DIR}/full.tfplan" --plan-doc "${P
   --target-version "${TARGET_VERSION}" --tf-dir "${TF_DIR}" \
   --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log
 ```
+
+Show the plan_check node comparison table to the user before apply.
 
 Only after PLAN-CHECK exits 0, apply the exact saved plan. If the plan changes nodes, a drain monitor
 must be running before the guard (`DRAIN-P4`/`DRAIN-P5` START with a live pid and no later STOP).

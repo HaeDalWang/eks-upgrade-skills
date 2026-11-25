@@ -205,18 +205,29 @@ def known(value):
 def missing_values(step, found):
     """Discovery fields a plan step still needs, as 'field (reason)' strings."""
     reasons = {u["field"]: u["reason"] for u in found.get("unknowns") or []}
-    group = {"nodes": ("mng", "release_version", "ami_variable", "target_release"),
-             "karpenter": ("karpenter", "alias", "alias_variable", "target_alias")}.get(step["type"])
+    groups = {"nodes": ("mng", "release_version", "ami_variable", "target_release"),
+              "karpenter": ("karpenter", "alias", "alias_variable", "target_alias")}
+    required = [groups[step["type"]]] if step["type"] in groups else []
+    if step["type"] == "full":
+        required = [group for pool, group in zip(("MNG", "Karpenter"), groups.values())
+                    if (found.get(group[0]) or {}).get("present") or pool in found.get("node_pools", [])]
     needs = []
     if step["type"] in ("cp", "nodes") and not step["targets"]:
         needs.append("module.address")
     elif step["type"] == "karpenter" and not step["targets"]:
         needs.append("karpenter.node_classes")
-    if group:
-        name, resolved, variable, target = group
+    for name, resolved, variable, target in required:
         if not step["expect"].get(resolved):
             needs.append(name + "." + target)
-        elif len(step["expect"]) < 2:
+            continue
+        has_variable = len(step["expect"]) >= 2
+        if step["type"] == "full":
+            variable_name = (found.get(name) or {}).get(variable)
+            other_variables = {(found.get(other) or {}).get(field)
+                               for other, _, field, _ in required if other != name}
+            has_variable = (bool(step["expect"].get(variable_name)) if known(variable_name) else
+                            bool(set(step["expect"]) - {"release_version", "alias"} - other_variables))
+        if not has_variable:
             needs.append(name + "." + variable)
     return ["{} ({})".format(n, reasons[n]) if n in reasons else n for n in needs]
 

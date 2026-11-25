@@ -95,6 +95,8 @@ python3 scripts/plan_check.py --planfile "${TF_DIR}/nodes.tfplan" --plan-doc "${
   --tf-dir "${TF_DIR}" --auth-prefix "${AUTH_PREFIX}" --audit-log audit.log
 ```
 
+Show the plan_check node comparison table to the user before apply.
+
 `aws_eks_node_group` `release_version` change → expected. Any `-/+` on `aws_eks_node_group` → STOP
 and ask the user.
 

@@ -12,6 +12,7 @@ The agent remains responsible for the checks, monitors, confirmation and phase g
 
 1. Run the calling site's `plan_check.py` and then `apply_guard.py` (Call 1), in the same order and
    with the same saved planfile, approved plan and drain monitors. Both must exit 0 before continuing.
+   Show the plan_check node comparison table to the user before apply.
 2. Show the user the **exact literal command** from that site's Call 2:
    `cd <TF_DIR> && <AUTH_PREFIX> terraform apply <TF_DIR>/<planfile>`.
    Substitute the actual paths, saved planfile and authentication prefix; quote paths, omit an empty
