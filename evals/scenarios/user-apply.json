@@ -109,17 +109,17 @@
   },
   "answer_rules": [
     {
-      "id": "user-apply",
-      "pattern": "cd\\s+[^\\n]+&&\\s+terraform apply\\s+[^\\n]*cp\\.tfplan",
-      "answer_ids": [
-        "user-applied"
-      ]
-    },
-    {
       "id": "approval",
       "pattern": "승인\\W{1,6}확인\\W{1,6}시작|approve\\W{1,8}confirm\\W{1,8}start",
       "answer_ids": [
         "approve-plan"
+      ]
+    },
+    {
+      "id": "user-apply",
+      "pattern": "cd\\s+[^\\n]+&&\\s+terraform apply\\s+[^\\n]*cp\\.tfplan",
+      "answer_ids": [
+        "user-applied"
       ]
     }
   ],

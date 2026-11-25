@@ -310,7 +310,12 @@ def answer_effect(run, scenario, last, user):
     from evals.shim import user_apply
     project = (run / 'project').resolve()
     audit = project / 'audit.log'
-    doc_path = project / 'upgrade-plan.json'
+    approvals = [r for r in records(audit) if r['rule_id'] == 'PLAN-APPROVED' and r['result'] == 'PASS']
+    if not approvals:
+        raise ValueError('user apply requires PLAN-APPROVED')
+    doc_path = Path(fields(approvals[-1]['detail'])['plan_doc']).resolve()
+    if not doc_path.is_relative_to(project):
+        raise ValueError('plan doc outside eval project')
     doc, step, _, _, _ = current(doc_path, audit)
     if step['type'] != 'cp':
         raise ValueError('fake user apply is restricted to the CP step')

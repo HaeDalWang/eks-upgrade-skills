@@ -454,15 +454,13 @@ def test_finished_plan_prints_null_and_next_hop_plans_in_same_dir_and_audit_log(
     assert capsys.readouterr().out == "null\n"
 
 
-def test_apply_command_render_uses_only_document_values_without_mutation(tmp_path):
+def test_apply_command_render_preview_without_mutation(tmp_path):
     path, _ = make_plan(tmp_path)
     original = path.read_bytes()
     doc = up.load(path)[1]
     rendered = up.render(doc)
     assert rendered.count('terraform apply') == len(doc['steps'])
-    assert 'unknown (auth_prefix absent from plan doc)' in rendered
-    assert 'unknown (planfile absent from plan doc)' in rendered
+    for step in doc['steps']:
+        assert "<AUTH_PREFIX> terraform apply {}".format(Path(doc['tf_dir']) / (step['type'] + '.tfplan')) in rendered
+    assert 'unknown' not in rendered.split('## Apply commands')[1].split('##')[0]
     assert path.read_bytes() == original
-    doc['auth_prefix'] = 'aws-vault exec example --'
-    doc['steps'][0]['planfile'] = 'saved plan.tfplan'
-    assert "cd {} && aws-vault exec example -- terraform apply '{}'".format(tmp_path, tmp_path / 'saved plan.tfplan') in up.render(doc)
