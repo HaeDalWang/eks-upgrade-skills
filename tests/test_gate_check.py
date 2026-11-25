@@ -104,7 +104,8 @@ class TestCom002CriticalFailSkipsRest:
             '--target-version', '1.34',
             '--audit-log', '/dev/null',
         ]):
-            with unittest.mock.patch.object(gate_check, 'run_cmd') as mock_run:
+            with unittest.mock.patch.object(gate_check, 'kubectl_json', return_value=None), \
+                    unittest.mock.patch.object(gate_check, 'run_cmd') as mock_run:
                 mock_run.return_value = subprocess.CompletedProcess(
                     [], 0, stdout="/usr/bin/kubectl", stderr="")
                 with pytest.raises(SystemExit) as exc_info:
@@ -2061,7 +2062,8 @@ class TestPhase0ResultKeysClusterAndTarget:
             'gate_check.py', '--cluster-name', 'test', '--current-version', '1.30',
             '--target-version', '1.34', '--audit-log', str(log),
         ]):
-            with unittest.mock.patch.object(gate_check, 'run_cmd') as mock_run:
+            with unittest.mock.patch.object(gate_check, 'kubectl_json', return_value=None), \
+                    unittest.mock.patch.object(gate_check, 'run_cmd') as mock_run:
                 mock_run.return_value = subprocess.CompletedProcess(
                     [], 0, stdout="/usr/bin/kubectl", stderr="")
                 with pytest.raises(SystemExit):
@@ -2148,6 +2150,7 @@ def test_new_critical_rules_exit_one_with_final_next_stop(tmp_path, capsys, rule
     from contextlib import ExitStack
     log = tmp_path / "audit.log"
     with ExitStack() as stack:
+        stack.enter_context(unittest.mock.patch("gate_check.kubectl_json", return_value=None))
         for name in vars(gate_check):
             if name.startswith("check_") and name != function:
                 stack.enter_context(unittest.mock.patch.object(gate_check, name))

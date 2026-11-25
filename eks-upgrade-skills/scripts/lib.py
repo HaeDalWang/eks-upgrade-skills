@@ -11,6 +11,7 @@ Python 3.9+ stdlib only — 서드파티 의존성 없음.
 import argparse
 import fcntl
 import json
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -121,6 +122,38 @@ def parse_audit_line(line: str) -> Optional[dict]:
         return None
     return dict(timestamp=timestamp, rule_id=rule_id, severity=severity,
                 result=result, detail=detail)
+
+
+def baseline_values(path: str, rule_id: str, scope: dict, field: str) -> Optional[set]:
+    """Read the latest matching script baseline; invalid evidence never grants a waiver."""
+    latest = None
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    for line in lines:
+        row = parse_audit_line(line)
+        if not row or row["rule_id"] != rule_id:
+            continue
+        try:
+            values = dict(token.split("=", 1) for token in shlex.split(row["detail"]))
+        except ValueError:
+            latest = None
+            continue
+        if any(values.get(key) != value for key, value in scope.items()):
+            continue
+        latest = None
+        if row["result"] != "INFO" or field not in values:
+            continue
+        try:
+            items = (json.loads(values[field]) if field == "addresses"
+                     else values[field].split(",") if values[field] else [])
+            if isinstance(items, list) and all(isinstance(item, str) and item
+                                               and item != "unknown" for item in items):
+                latest = set(items)
+        except ValueError:
+            continue
+    return latest
 
 
 def skill_revision() -> str:

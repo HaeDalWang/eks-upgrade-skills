@@ -1078,8 +1078,41 @@ def check_inf001(tf_exit_code: int, plan_output: str) -> None:
 # ══════════════════════════════════════════════════════════════
 # INF-004: Terraform Recreate 감지 — Data Plane 리소스 (HIGH/CRITICAL)
 # ══════════════════════════════════════════════════════════════
-def check_inf004(plan_output: str) -> None:
+def record_pod_baseline(cluster_name: str, target_version: str) -> None:
+    from phase_gate import classify_pods, workload_identity
+
+    pods, nodes = kubectl_json("pods", timeout=60), kubectl_json("nodes", timeout=60)
+    scope = f"cluster_name={shlex.quote(cluster_name)} target_version={shlex.quote(target_version)}"
+    if pods is None or nodes is None:
+        audit_write("BASELINE-PODS", "INFO", scope + " workloads=unknown reason='pod/node lookup failed'")
+        return
+    classification = classify_pods(pods, nodes)
+    # Only pods already broken count; TRANSIENT (young/terminating) must not waive a later real failure.
+    unhealthy = {(p["ns"], p["name"]) for p in classification.blocking + classification.stale}
+    workloads = sorted({workload_identity(p) for p in pods.get("items", [])
+                        if p.get("metadata", {}).get("namespace", "default") not in SYSTEM_NS
+                        and (p.get("metadata", {}).get("namespace", "?"),
+                             p.get("metadata", {}).get("name", "?")) in unhealthy})
+    audit_write("BASELINE-PODS", "INFO", scope + " workloads=" + shlex.quote(",".join(workloads)))
+
+
+def record_recreate_baseline(plan_output: str, tf_dir: str) -> None:
+    # Terraform's address comments preserve module paths and for_each/count indexes.
+    addresses = re.findall(r"^\s*# (.+?) (?:is tainted, so )?must be replaced\s*$",
+                           plan_output, re.MULTILINE)
+    replacements = list(REPLACE_PREFIX.finditer(plan_output))
+    if replacements and len(addresses) < len(replacements):
+        value, reason = "unknown", " reason='replacement address unavailable'"
+    else:
+        value, reason = json.dumps(sorted(set(addresses))), ""
+    audit_write("BASELINE-RECREATE", "INFO", "tf_dir=" + shlex.quote(str(Path(tf_dir).resolve()))
+                + " addresses=" + shlex.quote(value) + reason)
+
+
+def check_inf004(plan_output: str, tf_dir: str = "") -> None:
     """INF-004: Terraform Recreate 감지 (Data Plane 리소스)."""
+    if tf_dir:
+        record_recreate_baseline(plan_output, tf_dir)
     recreate_resources: list[str] = []
     # -/+ resource lines
     for m in REPLACE_PREFIX.finditer(plan_output):
@@ -1265,6 +1298,10 @@ def main() -> None:
     reset_gate()
     audit_init(args.cluster_name, args.current_version, args.target_version)
     audit_write("PHASE0", "ENTER", "gate_check")
+    record_pod_baseline(args.cluster_name, args.target_version)
+    if args.tf_dir:
+        audit_write("BASELINE-RECREATE", "INFO", "tf_dir=" + shlex.quote(str(Path(args.tf_dir).resolve()))
+                    + " addresses=unknown reason='terraform plan not yet verified'")
 
     # ── 전체 규칙 목록 (SKIPPED 추적용) ──
     ALL_RULES = [
@@ -1347,7 +1384,7 @@ def main() -> None:
                 record("INF-004", "HIGH", "SKIP",
                        "terraform plan 실행 불가 — recreate 검증 건너뜀 (운영 인증으로 직접 확인 권장)")
             else:
-                check_inf004(plan_output)
+                check_inf004(plan_output, args.tf_dir)
             track("INF-004")
         else:
             record("INF-004", "HIGH", "SKIP", "--tf-dir 미제공")

@@ -35,7 +35,7 @@ try:
         run_cmd, kubectl_json,
         GateArgumentParser, audit_init, audit_write, audit_flush, audit_append, parse_audit_line, record, GateResult,
         RED, YELLOW, GREEN, CYAN, NC,
-        SYSTEM_NS, ADDON_BAD_STATES,
+        SYSTEM_NS, ADDON_BAD_STATES, baseline_values,
         _gate, reset_gate,
     )
 except ImportError:
@@ -312,12 +312,43 @@ class PodClassification:
     blocking: list = field(default_factory=list)    # [{"ns": str, "name": str, "reason": str, "pending_min": float}]
 
 
+def workload_identity(pod: dict) -> str:
+    """Identify a workload across Pod replacements without a Kubernetes lookup."""
+    meta = pod.get("metadata", {})
+    owners = meta.get("ownerReferences", [])
+    owner = next((o for o in owners if o.get("controller")), owners[0] if owners else {})
+    kind, name = owner.get("kind", "Pod"), owner.get("name", meta.get("name", "unknown"))
+    if kind == "ReplicaSet":
+        template_hash = meta.get("labels", {}).get("pod-template-hash", "")
+        if template_hash and name.endswith("-" + template_hash):
+            kind, name = "Deployment", name[:-len(template_hash) - 1]
+    return f"{meta.get('namespace', 'default')}/{kind}/{name}"
+
+
+def baseline_blocking_pods(pods: dict, blocking: list, audit_log: str,
+                           cluster_name: str, target_version: str) -> tuple:
+    baseline = baseline_values(audit_log, "BASELINE-PODS",
+                               {"cluster_name": cluster_name, "target_version": target_version},
+                               "workloads")
+    identities = {(p.get("metadata", {}).get("namespace", "?"),
+                   p.get("metadata", {}).get("name", "?")): workload_identity(p)
+                  for p in pods.get("items", [])
+                  if p.get("metadata", {}).get("namespace", "default") not in SYSTEM_NS}
+    existing, new = [], []
+    for pod in blocking:
+        workload = identities.get((pod["ns"], pod["name"]))
+        (existing if baseline is not None and workload in baseline else new).append(pod)
+    return existing, new
+
+
 def classify_pods(pods_json: dict, nodes_json: dict, now=None) -> PodClassification:
     """unhealthy Pod를 TRANSIENT/STALE/BLOCKING 3단계로 분류."""
     if now is None:
         now = datetime.now(timezone.utc)
 
     result = PodClassification()
+
+    node_names = {node.get("metadata", {}).get("name") for node in nodes_json.get("items", [])}
 
     # Build node creation time map
     node_creation = {}
@@ -346,23 +377,35 @@ def classify_pods(pods_json: dict, nodes_json: dict, now=None) -> PodClassificat
 
     for pod in all_pods:
         phase = pod.get("status", {}).get("phase", "")
+        meta = pod.get("metadata", {})
+        node_name = pod.get("spec", {}).get("nodeName", "")
         if phase == "Succeeded":
             continue
 
         # Running Pod: 모든 컨테이너 ready 여부 확인
+        container_statuses = pod.get("status", {}).get("containerStatuses", [])
+        init_statuses = pod.get("status", {}).get("initContainerStatuses", [])
+        all_ready = (
+            all(cs.get("ready", False) for cs in container_statuses)
+            and all(
+                cs.get("ready", False)
+                or cs.get("state", {}).get("terminated", {}).get("reason") == "Completed"
+                for cs in init_statuses
+            )
+        ) if container_statuses else True
+        if phase == "Running" and all_ready:
+            continue
+
+        # S8: only an otherwise-unhealthy Pod on a gone node or being deleted is softened.
+        reason = ("terminating" if meta.get("deletionTimestamp") else
+                  "node gone" if node_name and node_name not in node_names else "")
+        if reason:
+            result.transient.append({"ns": meta.get("namespace", "?"),
+                                     "name": meta.get("name", "?"), "node": node_name,
+                                     "node_age_sec": 0, "reason": reason})
+            continue
+
         if phase == "Running":
-            container_statuses = pod.get("status", {}).get("containerStatuses", [])
-            init_statuses = pod.get("status", {}).get("initContainerStatuses", [])
-            all_ready = (
-                all(cs.get("ready", False) for cs in container_statuses)
-                and all(
-                    cs.get("ready", False)
-                    or cs.get("state", {}).get("terminated", {}).get("reason") == "Completed"
-                    for cs in init_statuses
-                )
-            ) if container_statuses else True
-            if all_ready:
-                continue
             # NotReady Running Pod → 시간 기준 분류
             ns = pod.get("metadata", {}).get("namespace", "?")
             name = pod.get("metadata", {}).get("name", "?")
@@ -600,6 +643,7 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
     bad_nodes = []
     checked = 0
     bad_other_nodes = False
+    all_bad_ca_deleting = True
     excluded_karpenter = 0
     excluded_fargate = 0
     for node in nodes:
@@ -627,6 +671,9 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
             bad_nodes.append(f"{name}(NotReady)")
         else:
             continue
+        all_bad_ca_deleting = all_bad_ca_deleting and any(
+            taint.get("key") == "ToBeDeletedByClusterAutoscaler"
+            for taint in node.get("spec", {}).get("taints", []))
         if ("karpenter.sh/nodepool" in labels
                 or labels.get("eks.amazonaws.com/compute-type") == "fargate"):
             bad_other_nodes = True
@@ -636,7 +683,7 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
     if bad_nodes:
         detail = f"비정상 노드: {', '.join(bad_nodes)}{scope_detail}"
         exit_code, detail = rollout_result(
-            audit_log, not bad_other_nodes and mng_rollout_in_progress(cluster_name), detail)
+            audit_log, all_bad_ca_deleting or (not bad_other_nodes and mng_rollout_in_progress(cluster_name)), detail)
         result = "WARN" if exit_code == 2 else "FAIL"
         audit_write("PHASE4-DATAPLANE", result, detail)
         print(f"{YELLOW if exit_code == 2 else RED}PHASE4-DATAPLANE {result}{NC}  {detail}")
@@ -730,8 +777,15 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
 
     classification = classify_pods(pods_json, nodes_json)
 
-    if classification.blocking:
-        detail = f"BLOCKING Pod {len(classification.blocking)}개: {', '.join(p['ns']+'/'+p['name'] for p in classification.blocking[:5])}"
+    existing, blocking = baseline_blocking_pods(
+        pods_json, classification.blocking, audit_log, cluster_name, target_version)
+    if existing:
+        detail = "baseline 기존 장애: " + ", ".join(p["ns"] + "/" + p["name"] for p in existing)
+        audit_write("PHASE4-DATAPLANE", "WARN", detail)
+        print(f"{YELLOW}PHASE4-DATAPLANE WARN{NC}  {detail}")
+        exit_code = 2
+    if blocking:
+        detail = f"BLOCKING Pod {len(blocking)}개: {', '.join(p['ns']+'/'+p['name'] for p in blocking[:5])}"
         audit_write("PHASE4-DATAPLANE", "FAIL", detail)
         print(f"{RED}❌ PHASE4-DATAPLANE FAIL{NC}  {detail}")
         exit_code = 1
@@ -741,11 +795,11 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
             audit_write("PHASE4-DATAPLANE", "WARN", detail)
             print(f"{YELLOW}⚠️ PHASE4-DATAPLANE WARN{NC}  {detail}")
         if classification.transient:
-            detail = f"TRANSIENT Pod {len(classification.transient)}개: {', '.join(p['ns']+'/'+p['name'] for p in classification.transient[:5])} — 재확인 필요"
+            detail = f"TRANSIENT Pod {len(classification.transient)}개: {', '.join(p['ns']+'/'+p['name']+' ('+p.get('reason', '대기')+')' for p in classification.transient[:5])} — 재확인 필요"
             audit_write("PHASE4-DATAPLANE", "WARN", detail)
             print(f"{YELLOW}⚠️ PHASE4-DATAPLANE WARN{NC}  {detail}")
         exit_code = 2
-    else:
+    elif not existing:
         audit_write("PHASE4-DATAPLANE", "PASS", "unhealthy Pod 없음")
         print(f"{GREEN}✅ PHASE4-DATAPLANE PASS{NC}  unhealthy Pod 없음")
 
@@ -936,19 +990,26 @@ def gate_phase6(tf_dir: str, audit_log: str, auth_prefix: str = "", tf_var_file:
 
         # recreate 감지: actions == ["delete", "create"] or ["create", "delete"]
         recreate_resources = []
+        recreate_addresses = set()
         for rc_entry in resource_changes:
             actions = rc_entry.get("change", {}).get("actions", [])
             if set(actions) == {"delete", "create"} and len(actions) == 2:
                 addr = rc_entry.get("address", "?")
                 rtype = rc_entry.get("type", "?")
                 recreate_resources.append(f"{rtype}({addr})")
+                recreate_addresses.add(addr)
 
         if recreate_resources:
             detail = f"recreate 감지: {', '.join(recreate_resources)}"
-            audit_write("PHASE6-TFSYNC", "FAIL", detail)
-            print(f"{RED}❌ PHASE6-TFSYNC FAIL{NC}  {detail}")
+            baseline = baseline_values(audit_log, "BASELINE-RECREATE", {"tf_dir": tf_dir}, "addresses")
+            known = baseline is not None and "?" not in recreate_addresses and recreate_addresses <= baseline
+            result = "WARN" if known else "FAIL"
+            if known:
+                detail = "Phase 0부터 있던 recreate drift: " + detail
+            audit_write("PHASE6-TFSYNC", result, detail)
+            print(f"PHASE6-TFSYNC {result}  {detail}")
             audit_flush(audit_log)
-            return 1
+            return 2 if known else 1
         else:
             audit_write("PHASE6-TFSYNC", "PASS", f"비파괴적 변경만 존재 ({len(resource_changes)}개)")
             print(f"{GREEN}✅ PHASE6-TFSYNC PASS{NC}  비파괴적 변경만 존재 ({len(resource_changes)}개)")
