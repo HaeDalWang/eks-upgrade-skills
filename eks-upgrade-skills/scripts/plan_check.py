@@ -23,7 +23,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from lib import GateArgumentParser, audit_append, run_cmd
+from lib import GateArgumentParser, audit_append, run_cmd, redact_plan_output
 from upgrade_plan import current, detail_fields, fields, load, records
 
 STEPS = ("cp", "addon", "nodes", "karpenter", "full")
@@ -241,6 +241,9 @@ def _print_node_table(resources, expected):
         allowed = _expected_values(expected, kind)
         values = _ami_values(change)
         matched = bool(values) and all(value and value in allowed for value in values)
+        change = redact_plan_output({"resource_changes": [resource]})["resource_changes"][0]["change"]
+        display_values = _ami_values(change)
+        display_allowed = {"***"} if "***" in display_values else allowed
         before, after = change.get("before") or {}, change.get("after") or {}
         unknown = change.get("after_unknown") or {}
         transitions = []
@@ -249,9 +252,9 @@ def _print_node_table(resources, expected):
             transitions.append("version: {} → {}".format(before.get("version") or "unknown", version or "unknown"))
         transitions.append("{}: {} → {}".format(kind,
             ", ".join(str(value) if value else "unknown" for value in _ami_values(change, "before")) or "unknown",
-            ", ".join(str(value) if value else "unknown" for value in values) or "unknown"))
+            ", ".join(str(value) if value else "unknown" for value in display_values) or "unknown"))
         rows.append("{} | {} | {} | {}".format(resource.get("address", resource["type"]),
-            ", ".join(sorted(allowed)) or "none", "; ".join(transitions), "yes" if matched else "no"))
+            ", ".join(sorted(display_allowed)) or "none", "; ".join(transitions), "yes" if matched else "no"))
     if rows:
         print("address | expected | before → after | match")
         print("\n".join(rows))

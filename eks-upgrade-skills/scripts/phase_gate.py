@@ -35,7 +35,7 @@ try:
         run_cmd, kubectl_json,
         GateArgumentParser, audit_init, audit_write, audit_flush, audit_append, parse_audit_line, record, GateResult,
         RED, YELLOW, GREEN, CYAN, NC,
-        SYSTEM_NS, ADDON_BAD_STATES, baseline_values,
+        SYSTEM_NS, ADDON_BAD_STATES, baseline_values, stalled_statefulsets,
         _gate, reset_gate,
     )
 except ImportError:
@@ -71,6 +71,17 @@ def gate_next(exit_code: int, rows: list) -> str:
 
     RUN emits only the fixed stale-Pod kind; no current gate requests a restart.
     """
+    by_statefulset = {}
+    for row in rows:
+        detail = row["detail"]
+        if "StatefulSetStalled:" not in detail:
+            continue
+        for stalled_detail in re.split(r"; (?=StatefulSetStalled:)",
+                                       detail[detail.index("StatefulSetStalled:"):]):
+            identity = stalled_detail.split(";", 1)[0]
+            by_statefulset.setdefault(identity, stalled_detail)
+    stalled = list(by_statefulset.values())
+    guidance = "; " + "; ".join(stalled) if stalled else ""
     if exit_code == 1:
         failures = [row["detail"] for row in rows if row["result"] == "FAIL"]
         conflicts = [detail for detail in failures if detail.startswith("CONFLICT ")]
@@ -85,7 +96,7 @@ def gate_next(exit_code: int, rows: list) -> str:
             zone = ",".join(dict.fromkeys(zones))
             return (f"NEXT: STOP no Ready node in zone {zone} for PV-bound Pods; add a node in {zone} "
                     "(node group desired +1), wait for the Pods, then restore desired")
-        return "NEXT: STOP gate failed; resolve FAIL records before retrying"
+        return "NEXT: STOP gate failed; resolve FAIL records before retrying" + guidance
     warnings = [row for row in rows if row["result"] == "WARN"]
     stale = [row for row in warnings if row["rule_id"] == "PHASE4-DATAPLANE"
              and row["detail"].startswith("STALE Pod ")]
@@ -93,13 +104,13 @@ def gate_next(exit_code: int, rows: list) -> str:
         pods = re.findall(r"(?:^|[ ,:])([a-z0-9.-]+/[a-z0-9.-]+)(?=[ ,—]|$)",
                           stale[-1]["detail"])
         if pods:
-            return "NEXT: RUN delete-stale-pods " + " ".join(pods)
+            return "NEXT: RUN delete-stale-pods " + " ".join(pods) + ("; ASK_USER " + "; ".join(stalled) if stalled else "")
     if any(row["detail"].startswith("ROLLOUT ") for row in warnings):
-        return "NEXT: RETRY wait 30s for the node rollout, then rerun gate"
+        return "NEXT: RETRY wait 30s for the node rollout, then rerun gate" + guidance
     if any(row["rule_id"] == "PHASE3-ADDON" or
            row["detail"].startswith("TRANSIENT Pod ") for row in warnings):
-        return "NEXT: RETRY wait for UPDATING add-ons or transient Pods, then rerun gate"
-    return "NEXT: ASK_USER review WARN records; reply exactly 승인 to continue or 중단 to stop"
+        return "NEXT: RETRY wait for UPDATING add-ons or transient Pods, then rerun gate" + guidance
+    return "NEXT: ASK_USER review WARN records; reply exactly 승인 to continue or 중단 to stop" + guidance
 
 
 def phase_boundary(number: int):
@@ -599,6 +610,45 @@ def pending_pv_gaps(pods: list, nodes: list) -> list:
     return gaps
 
 
+def check_stalled_statefulsets(audit_log: str, cluster_name: str, target_version: str,
+                              pods: dict) -> tuple:
+    data = kubectl_json("statefulsets")
+    if data is None:
+        audit_write("PHASE4-DATAPLANE", "INFO", "StatefulSet 조회 unknown — kubectl get statefulsets 실패")
+        return 0, []
+    baseline = baseline_values(audit_log, "BASELINE-PODS",
+                               {"cluster_name": cluster_name, "target_version": target_version}, "workloads")
+    details = []
+    result = 0
+    for item in stalled_statefulsets(data):
+        meta = item.get("metadata", {})
+        ns, name = meta.get("namespace", "default"), meta.get("name", "unknown")
+        identity = f"{ns}/StatefulSet/{name}"
+        known = baseline is not None and identity in baseline
+        targets = []
+        for pod in pods.get("items", []):
+            if workload_identity(pod) != identity:
+                continue
+            status = pod.get("status", {})
+            if any(c.get("type") == "Ready" and c.get("status") == "True"
+                   for c in status.get("conditions", [])):
+                continue
+            if (not any(c.get("type") == "Ready" for c in status.get("conditions", []))
+                    and status.get("containerStatuses")
+                    and all(c.get("ready") for c in status["containerStatuses"])):
+                continue
+            pod_name = pod.get("metadata", {}).get("name", "unknown")
+            targets.append(f"kubectl delete pod {pod_name} -n {ns}")
+        guidance = "; ".join(targets) or f"inspect {identity} unready Pods, then kubectl delete pod <unready-pod> -n {ns}"
+        detail = (f"StatefulSetStalled: {identity}; " + ("baseline 기존 장애; " if known else "신규/기준 불명 장애; ")
+                  + "inspect unready Pods before deletion; " + guidance)
+        details.append(detail)
+        audit_write("PHASE4-DATAPLANE", "WARN", detail)
+        print(f"{YELLOW}PHASE4-DATAPLANE WARN{NC}  {detail}")
+        result = 2
+    return result, details
+
+
 @phase_boundary(4)
 def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
                 node_scope: str = "all") -> int:
@@ -775,17 +825,24 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
                                if pod.get("metadata", {}).get("namespace", "default") + "/" +
                                pod.get("metadata", {}).get("name", "?") not in affected]}
 
+    sts_code, sts_details = check_stalled_statefulsets(audit_log, cluster_name, target_version, pods_json)
+    if sts_code:
+        exit_code = 2
     classification = classify_pods(pods_json, nodes_json)
 
     existing, blocking = baseline_blocking_pods(
         pods_json, classification.blocking, audit_log, cluster_name, target_version)
     if existing:
         detail = "baseline 기존 장애: " + ", ".join(p["ns"] + "/" + p["name"] for p in existing)
+        if sts_details:
+            detail += "; " + "; ".join(sts_details)
         audit_write("PHASE4-DATAPLANE", "WARN", detail)
         print(f"{YELLOW}PHASE4-DATAPLANE WARN{NC}  {detail}")
         exit_code = 2
     if blocking:
         detail = f"BLOCKING Pod {len(blocking)}개: {', '.join(p['ns']+'/'+p['name'] for p in blocking[:5])}"
+        if sts_details:
+            detail += "; " + "; ".join(sts_details)
         audit_write("PHASE4-DATAPLANE", "FAIL", detail)
         print(f"{RED}❌ PHASE4-DATAPLANE FAIL{NC}  {detail}")
         exit_code = 1
@@ -799,7 +856,7 @@ def gate_phase4(cluster_name: str, target_version: str, audit_log: str,
             audit_write("PHASE4-DATAPLANE", "WARN", detail)
             print(f"{YELLOW}⚠️ PHASE4-DATAPLANE WARN{NC}  {detail}")
         exit_code = 2
-    elif not existing:
+    elif not existing and not sts_code:
         audit_write("PHASE4-DATAPLANE", "PASS", "unhealthy Pod 없음")
         print(f"{GREEN}✅ PHASE4-DATAPLANE PASS{NC}  unhealthy Pod 없음")
 

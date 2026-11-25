@@ -10,13 +10,14 @@ drain_watch.py — 노드 드레인/교체 인라인 백그라운드 모니터
 `DRAIN-{PHASE}` 항목으로 한 줄씩 기록한다 (fcntl 락, 게이트 스크립트와 동시 쓰기 안전):
   - Warning 이벤트 (FailedDrain, DisruptionBlocked, OOMKilling 등)
   - PDB disruptionsAllowed=0 (최초 WARN, 연속 --pdb-fail-after초 차단 시 1회 FAIL)
+  - StatefulSet revision 불일치 + Ready 부족 (최초 WARN, 연속 600초 정체 시 FAIL)
   - NodeClaim Ready != True (Phase 5 Karpenter 교체)
 
 stdout에도 실시간 출력하므로 메인 에이전트가 BashOutput으로 진행 상황을 확인한다.
 
 Usage:
   python3 scripts/drain_watch.py --phase P5 --audit-log audit.log \
-    [--interval 30] [--max-duration 3600] [--pdb-fail-after 600] \
+    [--interval 30] [--max-duration 3600] [--pdb-fail-after 600] [--sts-fail-after 600] \
     [--scope all|kube-system] [--stop-file PATH]
 
 종료 조건 (셋 중 하나):
@@ -37,7 +38,7 @@ import time
 from typing import Optional
 
 try:
-    from lib import audit_append, run_cmd
+    from lib import audit_append, run_cmd, stalled_statefulsets
 except ImportError:
     print("ERROR: lib.py not found. Please reinstall the plugin.", file=sys.stderr)
     sys.exit(1)
@@ -68,6 +69,7 @@ WATCHED_REASONS: dict = {
 DEFAULT_INTERVAL_SEC = 30
 DEFAULT_MAX_DURATION_SEC = 3600
 DEFAULT_PDB_FAIL_AFTER_SEC = 600
+DEFAULT_STS_FAIL_AFTER_SEC = 600
 
 # 노드 교체 중 여러 Pod/노드에 걸쳐 대량으로 정상 발생하는 노이즈성 reason.
 # 이들은 count가 오를 때마다(폴링마다) 재기록하면 audit.log를 폭주시키므로
@@ -95,7 +97,35 @@ def event_key(evt: dict) -> str:
     return f"{uid}:{count}"
 
 
-def extract_warning_events(events_json: dict, seen_keys: set) -> tuple:
+def pod_target_nodes(pod: dict) -> set:
+    spec = pod.get("spec", {})
+    if spec.get("nodeName"):
+        return {spec["nodeName"]}
+    terms = (spec.get("affinity", {}).get("nodeAffinity", {})
+             .get("requiredDuringSchedulingIgnoredDuringExecution", {}).get("nodeSelectorTerms", []))
+    targets = set()
+    for term in terms:
+        names = [set(field.get("values", [])) for field in term.get("matchFields", [])
+                 if field.get("key") == "metadata.name" and field.get("operator") == "In"]
+        if not names:
+            return set()  # An alternative term can schedule onto other nodes.
+        targets.update(set.intersection(*names))
+    return targets
+
+
+def suppressed_daemonset_pods(pods: dict, nodes: dict) -> set:
+    retiring = {n.get("metadata", {}).get("name") for n in nodes.get("items", [])
+                if n.get("spec", {}).get("unschedulable")
+                or n.get("metadata", {}).get("deletionTimestamp")}
+    return {(p.get("metadata", {}).get("namespace", "default"),
+             p.get("metadata", {}).get("name"), p.get("metadata", {}).get("uid"))
+            for p in pods.get("items", [])
+            if pod_target_nodes(p) and pod_target_nodes(p) <= retiring
+            and any(o.get("kind") == "DaemonSet" and o.get("controller", True)
+                    for o in p.get("metadata", {}).get("ownerReferences", []))}
+
+
+def extract_warning_events(events_json: dict, seen_keys: set, suppressed=None) -> tuple:
     """Warning 이벤트 중 감시 대상 reason만, 아직 안 본 것만 추출.
 
     반환: (new_events: list[dict], updated_seen: set)
@@ -114,6 +144,14 @@ def extract_warning_events(events_json: dict, seen_keys: set) -> tuple:
         if key in seen:
             continue
         seen.add(key)
+        involved = evt.get("involvedObject", {})
+        identity = (involved.get("namespace") or evt.get("metadata", {}).get("namespace", "default"),
+                    involved.get("name"), involved.get("uid"))
+        is_suppressed = (identity in (suppressed or set()) or
+                         (not identity[2] and any(identity[:2] == key[:2] for key in (suppressed or set()))))
+        if (involved.get("kind") == "Pod" and is_suppressed
+                and reason in {"FailedMount", "NodeNotReady", "NodeNotSchedulable"}):
+            continue
         involved = evt.get("involvedObject", {})
         ns = evt.get("metadata", {}).get("namespace", "") or involved.get("namespace", "")
         new_events.append({
@@ -153,6 +191,14 @@ def extract_blocked_pdbs(pdb_json: dict, episodes: dict, now: float,
                 failed = True
             current[key] = (since, failed)
     return new_signals, current
+
+
+def extract_stalled_statefulsets(data: dict, episodes: dict, now: float, fail_after: int) -> tuple:
+    # Share the PDB episode state machine, including recovery and one-time escalation.
+    pdbs = {"items": [{"metadata": item.get("metadata", {}),
+                       "status": {"expectedPods": 1, "disruptionsAllowed": 0}}
+                      for item in stalled_statefulsets(data)]}
+    return extract_blocked_pdbs(pdbs, episodes, now, fail_after)
 
 
 def extract_bad_nodeclaims(nc_json: dict, seen_keys: set) -> tuple:
@@ -212,7 +258,9 @@ def watch_loop(phase: str, audit_log: str, interval: int, max_duration: int,
                scope: str, stop_file: str = None,
                poll_events=None, poll_pdb=None, poll_nc=None,
                sleep_fn=time.sleep, clock=time.monotonic,
-               pdb_fail_after: int = DEFAULT_PDB_FAIL_AFTER_SEC) -> int:
+               pdb_fail_after: int = DEFAULT_PDB_FAIL_AFTER_SEC,
+               sts_fail_after: int = DEFAULT_STS_FAIL_AFTER_SEC,
+               poll_sts=None, poll_pods=None, poll_nodes=None) -> int:
     """폴링 루프. 의존성(poll_*, sleep_fn, clock)은 테스트를 위해 주입 가능.
 
     반환: exit code (0=FAIL 이벤트 없음, 1=FAIL 이벤트 1건 이상).
@@ -227,6 +275,14 @@ def watch_loop(phase: str, audit_log: str, interval: int, max_duration: int,
     if poll_nc is None:
         poll_nc = lambda: _kubectl_get("nodeclaims", "none")
 
+    if poll_sts is None:
+        poll_sts = lambda: _kubectl_get("statefulsets", "all")
+    if poll_pods is None:
+        poll_pods = lambda: _kubectl_get("pods", "all")
+    if poll_nodes is None:
+        poll_nodes = lambda: _kubectl_get("nodes", "none")
+
+    sts_episodes: dict = {}
     seen_events: set = set()
     pdb_episodes: dict = {}
     seen_nc: set = set()
@@ -249,7 +305,9 @@ def watch_loop(phase: str, audit_log: str, interval: int, max_duration: int,
         # 1. Warning 이벤트
         events = poll_events()
         if events is not None:
-            new_evts, seen_events = extract_warning_events(events, seen_events)
+            pods, nodes = poll_pods(), poll_nodes()
+            suppressed = suppressed_daemonset_pods(pods, nodes) if pods is not None and nodes is not None else set()
+            new_evts, seen_events = extract_warning_events(events, seen_events, suppressed)
             for e in new_evts:
                 detail = f"{e['reason']}: {e['ns']}/{e['obj']} — {e['msg'][:140]}"
                 audit_append(audit_log, rule_id, e["severity"], detail)
@@ -272,6 +330,19 @@ def watch_loop(phase: str, audit_log: str, interval: int, max_duration: int,
                 audit_append(audit_log, rule_id, p["severity"], detail)
                 total["pdb"] += 1
                 print(f"[{p['severity']}] {detail}", flush=True)
+
+        statefulsets = poll_sts()
+        if statefulsets is not None:
+            signals, sts_episodes = extract_stalled_statefulsets(
+                statefulsets, sts_episodes, now, sts_fail_after)
+            for signal in signals:
+                elapsed = f" for {signal['elapsed']}s" if signal["severity"] == "FAIL" else ""
+                detail = (f"StatefulSetStalled: {signal['ns']}/{signal['name']}{elapsed}; "
+                          f"inspect unready Pods, then "
+                          f"kubectl delete pod <unready-pod> -n {signal['ns']}")
+                audit_append(audit_log, rule_id, signal["severity"], detail)
+                total["fail"] += int(signal["severity"] == "FAIL")
+                print(f"[{signal['severity']}] {detail}", flush=True)
 
         # 3. NodeClaim 비정상 (Karpenter 교체)
         ncs = poll_nc()
@@ -308,6 +379,8 @@ def main() -> int:
                         help=f"최대 실행 시간 초 — 무한 실행 방지 (기본: {DEFAULT_MAX_DURATION_SEC})")
     parser.add_argument("--pdb-fail-after", type=int, default=DEFAULT_PDB_FAIL_AFTER_SEC,
                         help=f"PDB 연속 차단 FAIL 임계값 초 (기본: {DEFAULT_PDB_FAIL_AFTER_SEC})")
+    parser.add_argument("--sts-fail-after", type=int, default=DEFAULT_STS_FAIL_AFTER_SEC,
+                        help="StatefulSet 연속 정체 FAIL 임계값 초 (기본: 600)")
     parser.add_argument("--scope", choices=["all", "kube-system"], default="all",
                         help="이벤트 감시 범위 (Phase 2는 kube-system, Phase 4/5는 all)")
     parser.add_argument("--stop-file", default=None,
@@ -316,6 +389,9 @@ def main() -> int:
 
     if args.pdb_fail_after <= 0:
         parser.error("--pdb-fail-after must be positive")
+
+    if args.sts_fail_after <= 0:
+        parser.error("--sts-fail-after must be positive")
 
     if shutil.which("kubectl") is None:
         print("ERROR: 'kubectl' not found in PATH.", file=sys.stderr)
@@ -329,6 +405,7 @@ def main() -> int:
         scope=args.scope,
         stop_file=args.stop_file,
         pdb_fail_after=args.pdb_fail_after,
+        sts_fail_after=args.sts_fail_after,
     )
 
 

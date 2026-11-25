@@ -273,3 +273,9 @@ def test_s13_tainted_address_is_recorded(tmp_path):
     row = next(lib.parse_audit_line(l) for l in lib._gate.audit_lines if 'BASELINE-RECREATE' in l)
     fields = dict(token.split('=', 1) for token in shlex.split(row['detail']))
     assert json.loads(fields['addresses']) == ['aws_instance.x']
+
+
+@pytest.fixture(autouse=True)
+def empty_statefulsets_for_existing_scenarios(monkeypatch):
+    # Existing scenarios have no StatefulSets; the new rollout query must stay offline.
+    monkeypatch.setattr(phase_gate, "kubectl_json", lambda *args, **kwargs: {"items": []})

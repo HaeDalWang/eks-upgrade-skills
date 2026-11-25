@@ -114,3 +114,13 @@ seen-set on recovery so a relapse is recorded again. Writes go through `lib.audi
 2. **No interpretation** — they record raw signals. The decision to STOP or proceed stays with the
    main agent reading the audit log and background output.
 3. **Audit via shared helper** — they never hand-write audit lines; they call `lib.audit_append()`.
+
+StatefulSet rollout stalls (`currentRevision != updateRevision` and `readyReplicas < replicas`)
+record a first WARN with `kubectl delete pod` guidance for the unready Pod, then one FAIL after
+`--sts-fail-after` seconds (default 600), using the same episode tracking as PDBs. Inspect the
+unready Pod before deletion; recovery resets the timer. Phase 4 includes stall targets and
+delete guidance in `NEXT:` and FAIL/WARN detail; new BLOCKING Pods still FAIL.
+`BASELINE-PODS` matches are labelled as existing failures.
+DaemonSet Pod scheduling warnings on cordoned or deleting nodes are suppressed; other Pod
+warnings and serious signals such as OOMKilling/FailedDrain are retained. If node/Pod lookup
+fails the filter does not suppress events.

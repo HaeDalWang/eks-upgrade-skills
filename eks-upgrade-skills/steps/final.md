@@ -79,3 +79,5 @@ Then replace only the `<!-- NARRATIVE:... -->` slots, in the output language:
 - `next-steps`: follow-ups for each WARN, or `없음`/`None`.
 
 Tell the user the report path and the overall result.
+
+After reporting and completing state confirmation, delete only this upgrade’s saved `.tfplan` files (including `cp.tfplan`); they contain unmasked sensitive values.

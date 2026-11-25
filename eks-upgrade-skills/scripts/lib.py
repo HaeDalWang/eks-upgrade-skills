@@ -11,6 +11,7 @@ Python 3.9+ stdlib only — 서드파티 의존성 없음.
 import argparse
 import fcntl
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -18,6 +19,62 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+DIAGNOSTIC_TARGET_LIMIT = 10
+SECRET_KEY = re.compile(r"(^|_)(password|secret|private_key)($|_)", re.I)
+
+
+def diagnostic_targets(items: list) -> str:
+    targets = list(dict.fromkeys(items))
+    extra = len(targets) - DIAGNOSTIC_TARGET_LIMIT
+    return ", ".join(targets[:DIAGNOSTIC_TARGET_LIMIT]) + (f" 외 {extra}개" if extra > 0 else "")
+
+
+def stalled_statefulsets(data: dict) -> list:
+    """Only compare known revisions/replicas; absent status is not rollout evidence."""
+    stalled = []
+    for item in data.get("items", []):
+        status, spec = item.get("status", {}), item.get("spec", {})
+        current, update = status.get("currentRevision"), status.get("updateRevision")
+        ready, replicas = status.get("readyReplicas", 0), spec.get("replicas")
+        if current and update and current != update and replicas is not None and ready < replicas:
+            stalled.append(item)
+    return stalled
+
+
+def redact_plan(value, sensitive=False):
+    """Copy JSON for display/storage; never use redacted data to authorize apply."""
+    if sensitive is True:
+        return "***"
+    if isinstance(value, dict):
+        masks = sensitive if isinstance(sensitive, dict) else {}
+        result = {}
+        for key, item in value.items():
+            mask = masks.get(key, False)
+            if SECRET_KEY.search(key):
+                mask = True
+            elif mask is not True and key in ("values", "before", "after", "value", "default"):
+                marker = {"values": "sensitive_values", "value": "sensitive", "default": "sensitive"}.get(key, key + "_sensitive")
+                mask = value.get(marker, mask)
+            result[key] = redact_plan(item, mask)
+        return result
+    if isinstance(value, list):
+        masks = sensitive if isinstance(sensitive, list) else []
+        return [redact_plan(item, masks[i] if i < len(masks) else False)
+                for i, item in enumerate(value)]
+    return value
+
+
+def redact_plan_output(plan):
+    """Mask plan paths before deriving or rendering diagnostics."""
+    safe = redact_plan(plan)
+    root = (plan.get("configuration") or {}).get("root_module") or {}
+    for name, declaration in (root.get("variables") or {}).items():
+        if isinstance(declaration, dict) and declaration.get("sensitive") is True:
+            if name in (safe.get("variables") or {}):
+                safe["variables"][name] = {"value": "***"}
+    return safe
+
 
 # ══════════════════════════════════════════════════════════════
 # 색상 상수 (터미널)

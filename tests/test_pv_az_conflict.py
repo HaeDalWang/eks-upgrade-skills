@@ -170,3 +170,9 @@ def test_fargate_node_in_pv_zone_does_not_close_gap(zonal):
                    'conditions': [{'type': 'Ready', 'status': 'True'}]}})
     assert gate.gate_phase4('demo', '1.35', str(audit)) == 1
     assert 'PV-AZ pod=default/redis-0 PV=disk zone=zone-c' in audit.read_text()
+
+
+@pytest.fixture(autouse=True)
+def empty_statefulsets_for_existing_scenarios(monkeypatch):
+    # Existing scenarios have no StatefulSets; the new rollout query must stay offline.
+    monkeypatch.setattr(gate, "kubectl_json", lambda *args, **kwargs: {"items": []})
