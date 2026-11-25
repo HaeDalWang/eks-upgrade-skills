@@ -11,8 +11,8 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCS = [ROOT / "k8s-upgrade-skills/SKILL.md", *sorted((ROOT / "k8s-upgrade-skills/steps").glob("*.md"))]
-SCRIPTS = ROOT / "k8s-upgrade-skills/scripts"
+DOCS = [ROOT / "eks-upgrade-skills/SKILL.md", *sorted((ROOT / "eks-upgrade-skills/steps").glob("*.md"))]
+SCRIPTS = ROOT / "eks-upgrade-skills/scripts"
 
 
 class ParsedCommand(Exception):

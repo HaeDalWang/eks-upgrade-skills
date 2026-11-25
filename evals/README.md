@@ -3,7 +3,7 @@
 현재 skill은 수정하지 않는다. 모든 시나리오는 `demo-eks`, 1.33 → 1.34이며,
 stdlib shim과 JSON 시나리오를 사용한다.
 
-| Scenario | Topology | 검증 대상 (`k8s-upgrade-skills/SKILL.md` + `steps/*.md`) |
+| Scenario | Topology | 검증 대상 (`eks-upgrade-skills/SKILL.md` + `steps/*.md`) |
 |---|---|---|
 | normal-karpenter-fargate | Karpenter + Fargate | 기존 정상 baseline |
 | cp-409 | Karpenter | cp.md 2-3-a: accepted 409 → ACTIVE → gate 전 sync apply 1회 |
@@ -27,7 +27,7 @@ K8S_EVAL=1 python3 -m evals.runner --model claude-opus-5-5 --run-dir evals/runs/
 결과 디렉토리에 저장하지 않는다. 실패한 shim gap을 고친 뒤의 재실행까지 **최대 3회**다.
 
 각 run은 임시 HOME, 일반화한 example Terraform 복사본, shim bin을 갖는다.
-`claude plugin marketplace add <REPO>`와 `claude plugin install k8s-upgrade-skills@k8s-upgrade-skills`로 현재 plugin을 설치한다.
+`claude plugin marketplace add <REPO>`와 `claude plugin install eks-upgrade-skills@eks-upgrade-skills`로 현재 plugin을 설치한다.
 `claude plugin list --json` 결과가 enabled가 아니면 실패하며 전체 설치 출력은 `install.log`에 남긴다.
 스크립트 호출은 plugin cache에서도 basename으로 집계하며 hook 자체는 agent call로 기록하지 않는다. 자식 환경은 HOME/PATH/TERM/LANG/
 CLAUDE_CODE_OAUTH_TOKEN만 전달하고, 매 turn 전에 CLI 경로와 환경을 검사한다.

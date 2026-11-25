@@ -1,4 +1,4 @@
-# K8s Upgrade Skills
+# EKS Upgrade Skills
 
 **Terraform으로 관리하는 Amazon EKS** 클러스터의 마이너 버전 업그레이드를 AI Agent가 단계별로 수행하도록 하는 **Skills** 모음입니다.
 
@@ -65,13 +65,16 @@ Claude Code와 Codex CLI에 같은 plugin을 설치합니다. 두 스킬과 APPL
 
 ```bash
 # Claude Code (로컬 checkout 경로도 marketplace add에 사용 가능)
-claude plugin marketplace add HaeDalWang/k8s-upgrade-skills
-claude plugin install k8s-upgrade-skills@k8s-upgrade-skills
+claude plugin marketplace add HaeDalWang/eks-upgrade-skills
+claude plugin install eks-upgrade-skills@eks-upgrade-skills
 
 # Codex CLI
-codex plugin marketplace add HaeDalWang/k8s-upgrade-skills
-codex plugin add k8s-upgrade-skills@k8s-upgrade-skills
+codex plugin marketplace add HaeDalWang/eks-upgrade-skills
+codex plugin add eks-upgrade-skills@eks-upgrade-skills
 ```
+
+> 예전 이름 `k8s-upgrade-skills`로 설치했다면 지우고 다시 설치하세요:
+> `claude plugin uninstall k8s-upgrade-skills@k8s-upgrade-skills` 후 `claude plugin marketplace remove k8s-upgrade-skills`, 그다음 위 명령.
 
 **Codex는 설치 후 `/hooks`에서 이 hook을 신뢰(trust)해야 합니다.** 신뢰하지 않으면 hook이 조용히 건너뛰어져 apply 차단이 동작하지 않습니다.
 
@@ -145,7 +148,7 @@ services:
 {
   "permissions": {
     "allow": [
-      "Bash(python3 k8s-upgrade-skills/scripts/*)",
+      "Bash(python3 eks-upgrade-skills/scripts/*)",
       "Bash(python3 scripts/*)",
       "Bash(kubectl get *)",
       "Bash(kubectl describe *)",
@@ -224,7 +227,7 @@ EKS 업그레이드는 위험하고, 단계가 많고, 오래 걸립니다. 이 
 ## 프로젝트 구조
 
 ```
-├── k8s-upgrade-skills/        # 업그레이드 스킬
+├── eks-upgrade-skills/        # 업그레이드 스킬
 │   ├── SKILL.md               #   진입점: 시작 흐름, 절대 규칙, 단계 루프
 │   ├── steps/                 #   단계별 절차 (start·cp·addons·nodes·karpenter·full·final·failure)
 │   ├── scripts/               #   조사·계획·게이트·감시·보고 스크립트 (discover, upgrade_plan, gate_check, phase_gate, plan_check, apply_guard, apply_confirm, report …)
@@ -239,4 +242,4 @@ EKS 업그레이드는 위험하고, 단계가 많고, 오래 걸립니다. 이 
 └── QnA.md
 ```
 
-`apply_confirm.py`: 사용자 직접 saved-plan apply 후 state 확인과 `USER-APPLY` 기록 ([절차](k8s-upgrade-skills/steps/user-apply.md)).
+`apply_confirm.py`: 사용자 직접 saved-plan apply 후 state 확인과 `USER-APPLY` 기록 ([절차](eks-upgrade-skills/steps/user-apply.md)).

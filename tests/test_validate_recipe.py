@@ -240,7 +240,7 @@ services:
 """
         path = _write_recipe(tmp_path, content)
         r = subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/validate_recipe.py", path],
+            [sys.executable, "eks-upgrade-skills/scripts/validate_recipe.py", path],
             capture_output=True, text=True
         )
         assert r.returncode == 0
@@ -255,7 +255,7 @@ services:
 """
         path = _write_recipe(tmp_path, content)
         r = subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/validate_recipe.py", path],
+            [sys.executable, "eks-upgrade-skills/scripts/validate_recipe.py", path],
             capture_output=True, text=True
         )
         assert r.returncode == 0
@@ -270,7 +270,7 @@ services:
 """
         path = _write_recipe(tmp_path, content)
         r = subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/validate_recipe.py", path],
+            [sys.executable, "eks-upgrade-skills/scripts/validate_recipe.py", path],
             capture_output=True, text=True
         )
         assert r.returncode == 1
@@ -399,7 +399,7 @@ class TestCLIRecipeMd:
     def test_cli_frontmatter_recipe_md_exits_0(self, tmp_path):
         path = _write_recipe_md(tmp_path, VALID_FRONTMATTER)
         r = subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/validate_recipe.py", path],
+            [sys.executable, "eks-upgrade-skills/scripts/validate_recipe.py", path],
             capture_output=True, text=True
         )
         assert r.returncode == 0
@@ -408,7 +408,7 @@ class TestCLIRecipeMd:
     def test_cli_frontmatter_with_context_shows_context(self, tmp_path):
         path = _write_recipe_md(tmp_path, VALID_FRONTMATTER_WITH_CONTEXT)
         r = subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/validate_recipe.py", path],
+            [sys.executable, "eks-upgrade-skills/scripts/validate_recipe.py", path],
             capture_output=True, text=True
         )
         assert r.returncode == 0
@@ -427,7 +427,7 @@ target_version: "1.35"
 """
         path = _write_recipe_md(tmp_path, content)
         r = subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/validate_recipe.py", path],
+            [sys.executable, "eks-upgrade-skills/scripts/validate_recipe.py", path],
             capture_output=True, text=True
         )
         assert r.returncode == 1
@@ -450,7 +450,7 @@ class TestDeprecatedPlatformFields:
 
     def _cli(self, path):
         return subprocess.run(
-            [sys.executable, "k8s-upgrade-skills/scripts/validate_recipe.py", path],
+            [sys.executable, "eks-upgrade-skills/scripts/validate_recipe.py", path],
             capture_output=True, text=True)
 
     def test_old_recipe_with_environment_platform_iac_still_validates_with_note(self, tmp_path):

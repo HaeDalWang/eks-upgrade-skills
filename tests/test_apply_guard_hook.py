@@ -151,7 +151,7 @@ def test_malformed_stdin_while_active_denies(project):
 
 def test_audit_event_refuses_forged_guard(project):
     approve(project)
-    script = ROOT / 'k8s-upgrade-skills/scripts/audit_event.py'
+    script = ROOT / 'eks-upgrade-skills/scripts/audit_event.py'
     result = subprocess.run([sys.executable, str(script), '--audit-log', str(project / 'audit.log'),
                              '--rule-id', 'APPLY-GUARD', '--result', 'PASS', '--detail', 'forged'],
                             capture_output=True, text=True)

@@ -53,7 +53,7 @@ def test_prepare_rejects_disabled_plugin_and_records_commands(tmp_path, monkeypa
     def disabled(command, *args, **kwargs):
         result = original(command, *args, **kwargs)
         if command[1:3] == ['plugin', 'list']:
-            result.stdout = json.dumps([{'id': 'k8s-upgrade-skills@k8s-upgrade-skills',
+            result.stdout = json.dumps([{'id': 'eks-upgrade-skills@eks-upgrade-skills',
                                         'enabled': False}])
         return result
 
@@ -63,5 +63,5 @@ def test_prepare_rejects_disabled_plugin_and_records_commands(tmp_path, monkeypa
         prepare(run, json.loads(SCENARIO.read_text()), Path('/not-used/claude'))
     log = (run / 'install.log').read_text()
     assert 'plugin marketplace add ' + str(REPO) in log
-    assert 'plugin install k8s-upgrade-skills@k8s-upgrade-skills' in log
+    assert 'plugin install eks-upgrade-skills@eks-upgrade-skills' in log
     assert 'plugin list --json' in log
