@@ -9,14 +9,15 @@ drain_watch.py — 노드 드레인/교체 인라인 백그라운드 모니터
 주기적으로 다음을 스냅샷으로 떠서 위험 신호를 감지하고, 새 신호만 audit.log에
 `DRAIN-{PHASE}` 항목으로 한 줄씩 기록한다 (fcntl 락, 게이트 스크립트와 동시 쓰기 안전):
   - Warning 이벤트 (FailedDrain, DisruptionBlocked, OOMKilling 등)
-  - PDB disruptionsAllowed=0 (drain 차단)
+  - PDB disruptionsAllowed=0 (최초 WARN, 연속 --pdb-fail-after초 차단 시 1회 FAIL)
   - NodeClaim Ready != True (Phase 5 Karpenter 교체)
 
 stdout에도 실시간 출력하므로 메인 에이전트가 BashOutput으로 진행 상황을 확인한다.
 
 Usage:
   python3 scripts/drain_watch.py --phase P5 --audit-log audit.log \
-    [--interval 30] [--max-duration 3600] [--scope all|kube-system] [--stop-file PATH]
+    [--interval 30] [--max-duration 3600] [--pdb-fail-after 600] \
+    [--scope all|kube-system] [--stop-file PATH]
 
 종료 조건 (셋 중 하나):
   1. --max-duration(초) 초과 — 무한 실행 방지 안전장치 (기본 3600초)
@@ -66,6 +67,7 @@ WATCHED_REASONS: dict = {
 
 DEFAULT_INTERVAL_SEC = 30
 DEFAULT_MAX_DURATION_SEC = 3600
+DEFAULT_PDB_FAIL_AFTER_SEC = 600
 
 # 노드 교체 중 여러 Pod/노드에 걸쳐 대량으로 정상 발생하는 노이즈성 reason.
 # 이들은 count가 오를 때마다(폴링마다) 재기록하면 audit.log를 폭주시키므로
@@ -124,14 +126,15 @@ def extract_warning_events(events_json: dict, seen_keys: set) -> tuple:
     return new_events, seen
 
 
-def extract_blocked_pdbs(pdb_json: dict, seen_keys: set) -> tuple:
-    """disruptionsAllowed=0 (expectedPods>0) PDB 중 아직 기록 안 한 것만 추출.
+def extract_blocked_pdbs(pdb_json: dict, episodes: dict, now: float,
+                         fail_after: int) -> tuple:
+    """차단 episode별 최초 WARN과 지속 임계값 도달 시 1회 FAIL을 추출.
 
-    상태가 유지되는 동안 중복 기록을 막고, 해소되면 seen에서 빼서 재발 시 다시 기록한다.
-    반환: (new_blocked: list[dict], updated_seen: set)
+    반환: (new_signals: list[dict], updated_episodes: dict)
+    episode는 (최초 감지 시각, FAIL 기록 여부). 해소 시 제거해 재발 타이머를 초기화한다.
     """
-    current = set()
-    new_blocked: list = []
+    current = {}
+    new_signals: list = []
     for pdb in pdb_json.get("items", []):
         status = pdb.get("status", {})
         allowed = status.get("disruptionsAllowed", 1)
@@ -140,11 +143,16 @@ def extract_blocked_pdbs(pdb_json: dict, seen_keys: set) -> tuple:
             ns = pdb.get("metadata", {}).get("namespace", "?")
             name = pdb.get("metadata", {}).get("name", "?")
             key = f"{ns}/{name}"
-            current.add(key)
-            if key not in seen_keys:
-                new_blocked.append({"ns": ns, "name": name})
-    # 현재 차단 상태인 것만 seen으로 유지 (해소된 것은 제거 → 재발 시 재기록)
-    return new_blocked, current
+            since, failed = episodes.get(key, (now, False))
+            elapsed = now - since
+            if key not in episodes:
+                new_signals.append({"ns": ns, "name": name, "severity": "WARN"})
+            elif not failed and elapsed >= fail_after:
+                new_signals.append({"ns": ns, "name": name, "severity": "FAIL",
+                                    "elapsed": int(elapsed)})
+                failed = True
+            current[key] = (since, failed)
+    return new_signals, current
 
 
 def extract_bad_nodeclaims(nc_json: dict, seen_keys: set) -> tuple:
@@ -203,7 +211,8 @@ def _kubectl_get(resource: str, scope: str = "all") -> Optional[dict]:
 def watch_loop(phase: str, audit_log: str, interval: int, max_duration: int,
                scope: str, stop_file: str = None,
                poll_events=None, poll_pdb=None, poll_nc=None,
-               sleep_fn=time.sleep, clock=time.monotonic) -> int:
+               sleep_fn=time.sleep, clock=time.monotonic,
+               pdb_fail_after: int = DEFAULT_PDB_FAIL_AFTER_SEC) -> int:
     """폴링 루프. 의존성(poll_*, sleep_fn, clock)은 테스트를 위해 주입 가능.
 
     반환: exit code (0=FAIL 이벤트 없음, 1=FAIL 이벤트 1건 이상).
@@ -219,7 +228,7 @@ def watch_loop(phase: str, audit_log: str, interval: int, max_duration: int,
         poll_nc = lambda: _kubectl_get("nodeclaims", "none")
 
     seen_events: set = set()
-    seen_pdb: set = set()
+    pdb_episodes: dict = {}
     seen_nc: set = set()
     total = {"event": 0, "pdb": 0, "nodeclaim": 0, "fail": 0}
 
@@ -229,7 +238,10 @@ def watch_loop(phase: str, audit_log: str, interval: int, max_duration: int,
                  f"pid={os.getpid()} DrainWatch started: scope={event_scope}, interval={interval}s (inline background monitor)")
 
     start = clock()
-    while clock() - start < max_duration:
+    while True:
+        now = clock()
+        if now - start >= max_duration:
+            break
         if stop_file and os.path.exists(stop_file):
             print("[drain_watch] stop-file detected — terminating", flush=True)
             break
@@ -249,12 +261,17 @@ def watch_loop(phase: str, audit_log: str, interval: int, max_duration: int,
         # 2. PDB 차단 (drain blocked)
         pdbs = poll_pdb()
         if pdbs is not None:
-            new_pdb, seen_pdb = extract_blocked_pdbs(pdbs, seen_pdb)
+            new_pdb, pdb_episodes = extract_blocked_pdbs(
+                pdbs, pdb_episodes, now, pdb_fail_after)
             for p in new_pdb:
                 detail = f"DisruptionBlocked(PDB): {p['ns']}/{p['name']} disruptionsAllowed=0"
-                audit_append(audit_log, rule_id, "WARN", detail)
+                if p["severity"] == "FAIL":
+                    detail = (f"DisruptionBlockedSustained(PDB): {p['ns']}/{p['name']} "
+                              f"disruptionsAllowed=0 for {p['elapsed']}s")
+                    total["fail"] += 1
+                audit_append(audit_log, rule_id, p["severity"], detail)
                 total["pdb"] += 1
-                print(f"[WARN] {detail}", flush=True)
+                print(f"[{p['severity']}] {detail}", flush=True)
 
         # 3. NodeClaim 비정상 (Karpenter 교체)
         ncs = poll_nc()
@@ -289,11 +306,16 @@ def main() -> int:
                         help=f"폴링 간격 초 (기본: {DEFAULT_INTERVAL_SEC})")
     parser.add_argument("--max-duration", type=int, default=DEFAULT_MAX_DURATION_SEC,
                         help=f"최대 실행 시간 초 — 무한 실행 방지 (기본: {DEFAULT_MAX_DURATION_SEC})")
+    parser.add_argument("--pdb-fail-after", type=int, default=DEFAULT_PDB_FAIL_AFTER_SEC,
+                        help=f"PDB 연속 차단 FAIL 임계값 초 (기본: {DEFAULT_PDB_FAIL_AFTER_SEC})")
     parser.add_argument("--scope", choices=["all", "kube-system"], default="all",
                         help="이벤트 감시 범위 (Phase 2는 kube-system, Phase 4/5는 all)")
     parser.add_argument("--stop-file", default=None,
                         help="이 경로에 파일이 생기면 다음 사이클에 정상 종료")
     args = parser.parse_args()
+
+    if args.pdb_fail_after <= 0:
+        parser.error("--pdb-fail-after must be positive")
 
     if shutil.which("kubectl") is None:
         print("ERROR: 'kubectl' not found in PATH.", file=sys.stderr)
@@ -306,6 +328,7 @@ def main() -> int:
         max_duration=args.max_duration,
         scope=args.scope,
         stop_file=args.stop_file,
+        pdb_fail_after=args.pdb_fail_after,
     )
 
 

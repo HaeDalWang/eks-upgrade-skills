@@ -41,7 +41,9 @@ python3 scripts/drain_watch.py --phase P4 --scope all --audit-log audit.log
 
 It polls all-namespace Warning events and PDB `disruptionsAllowed=0` every 30 s and appends `DRAIN-P4`
 lines. Wait for `DRAIN-P4 | START` with a pid. Check its output with BashOutput during the roll. A FAIL
-line means STOP; a `DisruptionBlocked(PDB)` WARN means a PDB blocks eviction: investigate, never force.
+line means STOP. A `DisruptionBlocked(PDB)` WARN is transient/normal during a roll: investigate, never
+force. Continuous blocking for ≥ 10 min (default `--pdb-fail-after 600`) emits
+`DisruptionBlockedSustained(PDB)` FAIL: STOP and investigate, never force.
 
 ## 4-0b. Start the service monitor (only when the recipe has `services`)
 
