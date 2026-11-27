@@ -11,7 +11,10 @@
 
 ## 업그레이드 흐름
 
-![업그레이드 흐름: 준비부터 Phase 7까지 각 단계와 게이트 판정 주체](docs/flow.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/flow-overview-dark.png">
+  <img alt="업그레이드 흐름: 사용자·에이전트·스크립트가 준비부터 Phase 7까지 각 단계에서 맡는 일과 판정" src="docs/flow-overview.png">
+</picture>
 
 | 단계 | 하는 일 | 게이트 (판정 주체) |
 |------|---------|-------------------|
@@ -26,11 +29,18 @@
 | Phase 6 | Terraform 전체 동기화 | `phase_gate.py phase6` — 남은 변경 없음 |
 | Phase 7 | Fargate Pod 재시작 → 전체 노드(MNG·Karpenter·Fargate) 재검증 → 보고서 | `phase_gate.py phase7` · `report.py` |
 
-**게이트 exit code**: `0` 진행 · `2` 사용자 확인 후 진행 · `1` 즉시 중단 · `127` CLI 도구 없음
+**게이트 exit code**: `0` 진행 · `2` `NEXT:` 줄대로 재시도 또는 사용자 확인 · `1` 즉시 중단 · `127` CLI 도구 없음
 
-**백그라운드 감시**: Phase 2·4·5 동안 에이전트가 감시 스크립트를 함께 띄웁니다.
-- `drain_watch.py` — Warning 이벤트, PDB 차단, NodeClaim 상태를 30초마다 확인
-- `service_watch.py` — recipe에 `services`가 있을 때만. EndpointSlice ready 수 + HTTP 헬스체크
+**apply 한 번의 흐름** (Phase 2~6 공통): 저장한 plan 파일이 두 검사를 모두 통과해야 apply합니다. apply는 에이전트가 하거나 사용자가 터미널에서 직접 합니다.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/flow-apply-dark.png">
+  <img alt="apply 흐름: saved plan → plan_check → apply_guard → 에이전트 또는 사용자 apply → Phase 게이트" src="docs/flow-apply.png">
+</picture>
+
+**백그라운드 감시**: Phase 2~6에서 apply할 때마다 에이전트가 감시 스크립트를 함께 띄웁니다.
+- `drain_watch.py` — Warning 이벤트, PDB 차단, NodeClaim 상태를 30초마다 확인. 노드가 바뀌는 apply는 이 감시가 떠 있어야 `apply_guard.py`를 통과합니다
+- `service_watch.py` — Phase 4·5에서, recipe에 `services`가 있을 때만. EndpointSlice ready 수 + HTTP 헬스체크
 
 **audit.log**: 모든 게이트와 감시 결과가 이 파일 하나에 누적됩니다. 쓰는 쪽은 스크립트뿐이고 에이전트는 읽기만 합니다. 계획서·결과 보고서도 이 기록을 근거로 작성됩니다.
 
